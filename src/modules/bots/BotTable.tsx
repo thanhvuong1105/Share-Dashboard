@@ -25,6 +25,18 @@ export type Bot = {
   credIdx?: number;
   investedAmount?: number | null;
   assetsInBot?: number | null;
+  totalTradesClosed?: number;
+  totalTradesOpen?: number;
+  leverage?: number | null;
+  position?: "Long" | "Short" | "None";
+  entryPrice?: number | null;
+  loseStreakAvgAll?: number | null;
+  loseStreakAvgPerRange?: Record<string, number>;
+  winStreakAvgAll?: number | null;
+  winStreakAvgPerRange?: Record<string, number>;
+  winRatePerRange?: Record<string, number>;
+  maxDdPerRange?: Record<string, number>;
+  closedPnlAllTime?: number;
 };
 
 interface BotTableProps {
@@ -34,28 +46,17 @@ interface BotTableProps {
   onBotDoubleClick: (bot: Bot) => void;
 }
 
-const fmtPercent = (v: number, digits = 1) => `${(v * 100).toFixed(digits)}%`;
-const formatSigned = (v: number) => (v > 0 ? `+${v}` : `${v}`);
-
-function calcRangeWr(avgWr: number, range: string): number {
-  const base = avgWr || 0.55;
-
-  switch (range) {
-    case "7D":
-      return Math.max(0.25, base - 0.18);
-    case "30D":
-      return Math.max(0.3, base - 0.15);
-    case "90D":
-      return Math.max(0.32, base - 0.12);
-    case "180D":
-      return Math.max(0.34, base - 0.1);
-    case "365D":
-      return Math.max(0.35, base - 0.08);
-    case "ALL":
-    default:
-      return Math.max(0.36, base - 0.06);
+const getBotTotalTrades = (bot: Bot) => {
+  const total = Number(bot.totalTrades);
+  if (Number.isFinite(total)) {
+    return total;
   }
-}
+  const closed = Number(bot.totalTradesClosed ?? 0);
+  const openFallback = bot.totalTradesOpen ?? (bot.hasOpenPosition ? 1 : 0);
+  const open = Number(openFallback ?? 0);
+  const fallback = closed + open;
+  return fallback > 0 ? fallback : 0;
+};
 
 function calcCurrentDd(maxDd: number, range: string): number {
   const abs = Math.abs(maxDd) || 0.2;
@@ -118,8 +119,16 @@ const BotTable: React.FC<BotTableProps> = ({
   range,
   onBotDoubleClick,
 }) => {
+  const formatStreakAvg = (value?: number | null) =>
+    typeof value === "number" && Number.isFinite(value)
+      ? value.toFixed(1)
+      : "0.0";
+  const formatPercent = (value?: number | null) =>
+    typeof value === "number" && Number.isFinite(value)
+      ? `${(value * 100).toFixed(1)}%`
+      : "0%";
   // ===== SUMMARY CALCULATIONS =====
-  const totalTrades = bots.reduce((s, b) => s + b.totalTrades, 0);
+  const totalTrades = bots.reduce((s, b) => s + getBotTotalTrades(b), 0);
   const totalPnl = bots.reduce((s, b) => s + b.totalPnl, 0);
   const totalPnlLabel =
     totalPnl >= 0 ? `+${totalPnl.toFixed(2)}` : totalPnl.toFixed(2);
@@ -163,33 +172,98 @@ const BotTable: React.FC<BotTableProps> = ({
               <th className="px-3 py-2 text-center font-normal">
                 Assets In Bot
               </th>
+              <th className="px-3 py-2 text-center font-normal">Total PnL</th>
               <th className="px-3 py-2 text-center font-normal">TF</th>
-              <th className="px-3 py-2 text-center font-normal">Status</th>
+              <th className="px-3 py-2 text-center font-normal">Leverage</th>
+              <th className="px-3 py-2 text-center font-normal">Entry Price</th>
               <th className="px-3 py-2 text-center font-normal">Position</th>
               <th className="px-3 py-2 text-center">Position PnL</th>
-              <th className="px-3 py-2 text-center">Total PnL</th>
               <th className="px-3 py-2 text-center">Total Trades</th>
               <th className="px-3 py-2 text-center">Range/Avg WR</th>
-              <th className="px-3 py-2 text-center">Current/MAX DD</th>
-              <th className="px-3 py-2 text-center">Win/Lose Streak</th>
+              <th className="px-3 py-2 text-center">Current/AVG DD</th>
+              <th className="px-3 py-2 text-center">Win/Lose Streak (/AVG)</th>
               <th className="px-3 py-2 text-center">Profit Factor</th>
             </tr>
           </thead>
 
           <tbody>
             {bots.map((bot) => {
-              const rangeWr = calcRangeWr(bot.avgWr, range);
-              const avgWr = fmtPercent(bot.avgWr, 0);
-              const rangeWrLabel = fmtPercent(calcRangeWr(bot.avgWr, range));
-              const currentDd = calcCurrentDd(bot.maxDd, range);
-              const currentDdAbs = Math.abs(Number(currentDd.toFixed(2)));
-              const maxDdAbs = Math.abs(Number((bot.maxDd * 100).toFixed(2)));
+              const ddMap = bot.maxDdPerRange || {};
+              const allTimeDd =
+                (ddMap && typeof ddMap.ALL === "number" ? ddMap.ALL : undefined) ??
+                (typeof bot.maxDd === "number" ? bot.maxDd : undefined);
+              const avgDdValue = allTimeDd ?? (typeof bot.maxDd === "number" ? bot.maxDd : 0);
+              let currentDdValue =
+                typeof ddMap[range] === "number" ? ddMap[range] : undefined;
+              if (range.toUpperCase() === "ALL") {
+                currentDdValue = allTimeDd ?? currentDdValue;
+              }
+              if (currentDdValue === undefined) {
+                currentDdValue = calcCurrentDd(avgDdValue, range);
+              }
+              const currentDdAbs = Math.abs(
+                Number((currentDdValue * 100).toFixed(2))
+              );
+              const maxDdAbs = Math.abs(
+                Number((avgDdValue * 100).toFixed(2))
+              );
+              const leverageValue = Number(bot.leverage ?? 0);
+              const leverageLabel = Number.isFinite(leverageValue) && leverageValue > 0
+                ? `${leverageValue}x`
+                : "—";
+              const entryPriceValue = Number(bot.entryPrice ?? 0);
+              const entryPriceLabel =
+                Number.isFinite(entryPriceValue) && entryPriceValue !== 0
+                  ? entryPriceValue.toFixed(2)
+                  : "—";
+              const positionLabel = bot.position
+                ? bot.position
+                : bot.hasOpenPosition
+                ? bot.side
+                : "None";
               const positionPnlClass =
                 bot.positionPnl === 0
                   ? "text-neutral-100"
                   : bot.positionPnl > 0
                   ? "text-emerald-400"
                   : "text-red-400";
+              const loseAvgMap = bot.loseStreakAvgPerRange || {};
+              const loseAvgRange =
+                typeof loseAvgMap[range] === "number"
+                  ? loseAvgMap[range]
+                  : typeof bot.loseStreakAvgAll === "number"
+                  ? bot.loseStreakAvgAll
+                  : 0;
+              const loseAvgAll =
+                typeof bot.loseStreakAvgAll === "number"
+                  ? bot.loseStreakAvgAll
+                  : typeof loseAvgMap.ALL === "number"
+                  ? loseAvgMap.ALL
+                  : loseAvgRange;
+              const winAvgMap = bot.winStreakAvgPerRange || {};
+              const winAvgRange =
+                typeof winAvgMap[range] === "number"
+                  ? winAvgMap[range]
+                  : typeof bot.winStreakAvgAll === "number"
+                  ? bot.winStreakAvgAll
+                  : 0;
+              const winAvgAll =
+                typeof bot.winStreakAvgAll === "number"
+                  ? bot.winStreakAvgAll
+                  : typeof winAvgMap.ALL === "number"
+                  ? winAvgMap.ALL
+                  : winAvgRange;
+              const winRateMap = bot.winRatePerRange || {};
+              const rangeWrValue =
+                typeof winRateMap[range] === "number"
+                  ? winRateMap[range]
+                  : typeof winRateMap.ALL === "number"
+                  ? winRateMap.ALL
+                  : 0;
+              const avgWrValue =
+                typeof winRateMap.ALL === "number"
+                  ? winRateMap.ALL
+                  : rangeWrValue;
 
               return (
                 <tr
@@ -222,46 +296,6 @@ const BotTable: React.FC<BotTableProps> = ({
                     {((bot.investedAmount ?? 0) + (bot.totalPnl ?? 0)).toFixed(2)}
                   </td>
 
-                  {/* Timeframe */}
-                  <td className="px-3 py-2 text-[11px] text-center">
-                    {bot.timeframe}
-                  </td>
-
-                  {/* Status */}
-                  <td className="px-3 py-2 text-center">
-                    <span
-                      className={`text-[11px] px-2 py-0.5 rounded-full border ${
-                        bot.status === "Running"
-                          ? "border-emerald-500/40 text-emerald-300 bg-emerald-500/5"
-                          : "border-neutral-600 text-neutral-300"
-                      }`}
-                    >
-                      {bot.status}
-                    </span>
-                  </td>
-
-                  {/* Position (side) */}
-                  <td className="px-3 py-2 text-center">
-                    <span
-                      className={`text-[11px] px-2 py-0.5 rounded-full border ${
-                        bot.side === "Long"
-                          ? "border-emerald-500/40 text-emerald-300 bg-emerald-500/5"
-                          : "border-red-500/40 text-red-300 bg-red-500/5"
-                      }`}
-                    >
-                      {bot.side}
-                    </span>
-                  </td>
-
-                  {/* Position PnL */}
-                  <td className="px-3 py-2 text-center">
-                    <span className={positionPnlClass}>
-                      {bot.positionPnl > 0
-                        ? `+${bot.positionPnl.toFixed(2)}`
-                        : bot.positionPnl.toFixed(2)}
-                    </span>
-                  </td>
-
                   {/* Total PnL */}
                   <td className="px-3 py-2 text-center">
                     <span
@@ -275,14 +309,55 @@ const BotTable: React.FC<BotTableProps> = ({
                     </span>
                   </td>
 
+                  {/* Timeframe */}
+                  <td className="px-3 py-2 text-[11px] text-center">
+                    {bot.timeframe}
+                  </td>
+
+                  {/* Leverage */}
+                  <td className="px-3 py-2 text-center text-xs text-neutral-200">
+                    {leverageLabel}
+                  </td>
+
+                  {/* Entry Price */}
+                  <td className="px-3 py-2 text-center text-xs text-neutral-200">
+                    {entryPriceLabel}
+                  </td>
+
+                  {/* Position (side) */}
+                  <td className="px-3 py-2 text-center">
+                    <span
+                      className={`text-[11px] px-2 py-0.5 rounded-full border ${
+                        positionLabel === "Long"
+                          ? "border-emerald-500/40 text-emerald-300 bg-emerald-500/5"
+                          : positionLabel === "Short"
+                          ? "border-red-500/40 text-red-300 bg-red-500/5"
+                          : "border-neutral-600 text-neutral-300"
+                      }`}
+                    >
+                      {positionLabel}
+                    </span>
+                  </td>
+
+                  {/* Position PnL */}
+                  <td className="px-3 py-2 text-center">
+                    <span className={positionPnlClass}>
+                      {bot.positionPnl > 0
+                        ? `+${bot.positionPnl.toFixed(2)}`
+                        : bot.positionPnl.toFixed(2)}
+                    </span>
+                  </td>
+
                   {/* Total Trades */}
-                  <td className="px-3 py-2 text-center">{bot.totalTrades}</td>
+                  <td className="px-3 py-2 text-center">
+                    {getBotTotalTrades(bot)}
+                  </td>
 
                   {/* Range / Avg WR */}
                   <td className="px-3 py-2 text-center">
                     <div className="text-[11px] text-neutral-100 flex justify-center gap-1">
-                      <span>{rangeWrLabel}</span>
-                      <span>/ {avgWr}</span>
+                      <span>{formatPercent(rangeWrValue)}</span>
+                      <span>/ {formatPercent(avgWrValue)}</span>
                     </div>
                   </td>
 
@@ -296,13 +371,23 @@ const BotTable: React.FC<BotTableProps> = ({
 
                   {/* Win / Lose Streak */}
                   <td className="px-3 py-2 text-center">
-                    <div className="text-[11px] flex items-center justify-center gap-2">
-                      <span className="text-emerald-400">
-                        {bot.winStreakCurrent} / {bot.winStreakMax}
-                      </span>
-                      <span className="text-red-400">
-                        {bot.loseStreakCurrent} / {bot.loseStreakMax}
-                      </span>
+                    <div className="text-[11px] flex items-center justify-center gap-3">
+                      <div className="flex items-center gap-1">
+                        <span className="text-emerald-400">
+                          {formatStreakAvg(winAvgRange)}
+                        </span>
+                        <span className="text-neutral-500">
+                          / {formatStreakAvg(winAvgAll)}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <span className="text-red-400">
+                          {formatStreakAvg(loseAvgRange)}
+                        </span>
+                        <span className="text-neutral-500">
+                          / {formatStreakAvg(loseAvgAll)}
+                        </span>
+                      </div>
                     </div>
                   </td>
 
@@ -324,6 +409,16 @@ const BotTable: React.FC<BotTableProps> = ({
               <td className="px-3 py-2 text-center text-[11px] text-neutral-200">
                 {totalAssetsLabel}
               </td>
+              <td className="px-3 py-2 text-center">
+                <span
+                  className={totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}
+                >
+                  {totalPnlLabel}
+                </span>
+              </td>
+              <td className="px-3 py-2 text-center text-[11px] text-neutral-200">
+                —
+              </td>
               <td className="px-3 py-2 text-center text-[11px] text-neutral-200">
                 —
               </td>
@@ -342,20 +437,13 @@ const BotTable: React.FC<BotTableProps> = ({
                   {positionPnlTotalLabel}
                 </span>
               </td>
-              <td className="px-3 py-2 text-center">
-                <span
-                  className={totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}
-                >
-                  {totalPnlLabel}
-                </span>
-              </td>
               <td className="px-3 py-2 text-center text-neutral-200">
                 {totalTrades}
               </td>
               <td className="px-3 py-2 text-center">
                 <div className="flex justify-center gap-1 text-neutral-100">
-                  <span>40%</span>
-                  <span>/ 55%</span>
+                  <span>0%</span>
+                  <span>/0%</span>
                 </div>
               </td>
               <td className="px-3 py-2 text-center">

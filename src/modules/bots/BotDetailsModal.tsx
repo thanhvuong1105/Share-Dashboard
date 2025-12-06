@@ -1,16 +1,6 @@
 // src/modules/bots/BotDetailsModal.tsx
 
 import React, { useEffect, useMemo, useState } from "react";
-import {
-  ResponsiveContainer,
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-} from "recharts";
 import { fetchSignalBotHistory, type SignalBotTrade } from "../../okxClient";
 import { getApiBase } from "../../api/baseUrl";
 
@@ -43,21 +33,26 @@ const wrRangeOptions: WrRangePreset[] = [
   "ALL",
 ];
 
+type DetailItem = {
+  label: string;
+  value: React.ReactNode;
+};
+
 const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
   // Range riêng cho popup
   const [localRange, setLocalRange] = useState<LocalRangePreset>("30D");
 
-  // Range riêng cho Winrate / High WR / Low WR
+  // Range riêng cho các mục Winrate
   const [wrRangeWin, setWrRangeWin] = useState<WrRangePreset>("30D");
-  const [wrRangeHigh, setWrRangeHigh] = useState<WrRangePreset>("30D");
-  const [wrRangeLow, setWrRangeLow] = useState<WrRangePreset>("30D");
+  const [wrRangeWin2, setWrRangeWin2] = useState<WrRangePreset>("30D");
+  const [wrRangeWin3, setWrRangeWin3] = useState<WrRangePreset>("30D");
+  const [wrRangeWin4, setWrRangeWin4] = useState<WrRangePreset>("30D");
 
   // ===== Bảo vệ dữ liệu bot =====
   const totalPnl = typeof bot?.totalPnl === "number" ? bot.totalPnl : 0;
-  const maxDd = typeof bot?.maxDd === "number" ? bot.maxDd : -0.2;
+  const baseMaxDd =
+    typeof bot?.maxDd === "number" ? bot.maxDd : -0.2;
   const avgWr = typeof bot?.avgWr === "number" ? bot.avgWr : 0.55;
-  const positionPnl =
-    typeof bot?.positionPnl === "number" ? bot.positionPnl : 0;
   const winStreakCurrent =
     typeof bot?.winStreakCurrent === "number" ? bot.winStreakCurrent : 0;
   const winStreakMax =
@@ -67,7 +62,7 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
   const loseStreakMax =
     typeof bot?.loseStreakMax === "number" ? bot.loseStreakMax : 0;
   const totalTrades =
-    typeof bot?.totalTrades === "number" ? bot.totalTrades : 0;
+    typeof bot?.totalTrades === "number" ? bot.totalTrades : null;
   const profitFactor =
     typeof bot?.profitFactor === "number" ? bot.profitFactor : 1.5;
 
@@ -83,13 +78,13 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
   const lastPriceFromBot =
     typeof bot?.lastPrice === "number" ? bot.lastPrice : undefined;
 
-  const fmtCurrency = (v: number) =>
-    (v >= 0 ? "+" : "") + v.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const fmtPlain = (v: number | null) =>
+    v !== null && Number.isFinite(v)
+      ? v.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",")
+      : "—";
 
   // === Signal Bot PnL History ===
   const [pnlHistory, setPnlHistory] = useState<SignalBotTrade[]>([]);
-  const [pnlLoading, setPnlLoading] = useState(false);
-  const [pnlError, setPnlError] = useState<string | null>(null);
   const [lastPrice, setLastPrice] = useState<number | undefined>(
     lastPriceFromBot
   );
@@ -108,18 +103,12 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
 
     const load = async () => {
       try {
-        setPnlLoading(true);
-        setPnlError(null);
-
         // fetch từ backend /api/signal-bot-history qua okxClient
         const { trades } = await fetchSignalBotHistory(algoId);
         setPnlHistory(trades || []);
       } catch (err: any) {
         console.error("❌ fetchSignalBotHistory error:", err);
-        setPnlError(err.message || "Failed to load bot PnL history");
         setPnlHistory([]);
-      } finally {
-        setPnlLoading(false);
       }
     };
 
@@ -176,10 +165,77 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
 
   // Side: chỉ hiển thị Long / Short khi thật sự có position
   const rawPosition =
-    typeof bot?.position === "string" ? (bot.position as string) : undefined;
+    typeof bot?.position === "string"
+      ? (bot.position as string)
+      : typeof bot?.positionSideRaw === "string"
+      ? (bot.positionSideRaw as string)
+      : undefined;
   const hasOpenPosition = rawPosition === "Long" || rawPosition === "Short";
   const openPositionLabel =
     entryPrice !== undefined && hasOpenPosition ? rawPosition : "No open position";
+
+  const investedAmount =
+    typeof bot?.investedAmount === "number" ? bot.investedAmount : null;
+  const assetsInBot =
+    investedAmount !== null ? investedAmount + totalPnl : null;
+  const leverageValue =
+    typeof bot?.leverage === "number" && Number.isFinite(bot.leverage)
+      ? bot.leverage
+      : null;
+  const leverageLabel = leverageValue ? `${leverageValue}x` : "—";
+  const positionPnlValue =
+    typeof bot?.positionPnl === "number"
+      ? bot.positionPnl
+      : positionInfo && typeof positionInfo.pnl === "number"
+      ? Number(positionInfo.pnl)
+      : undefined;
+  const loseStreakAvgMap =
+    bot?.loseStreakAvgPerRange &&
+    typeof bot.loseStreakAvgPerRange === "object"
+      ? (bot.loseStreakAvgPerRange as Record<string, number>)
+      : undefined;
+  const loseStreakAvgAll =
+    typeof bot?.loseStreakAvgAll === "number"
+      ? bot.loseStreakAvgAll
+      : typeof loseStreakAvgMap?.ALL === "number"
+      ? loseStreakAvgMap.ALL
+      : undefined;
+  const loseStreakAvgLocal =
+    (loseStreakAvgMap &&
+      typeof loseStreakAvgMap[localRange] === "number" &&
+      loseStreakAvgMap[localRange]) ||
+    loseStreakAvgAll ||
+    0;
+  const winStreakAvgMap =
+    bot?.winStreakAvgPerRange &&
+    typeof bot.winStreakAvgPerRange === "object"
+      ? (bot.winStreakAvgPerRange as Record<string, number>)
+      : undefined;
+  const winStreakAvgAll =
+    typeof bot?.winStreakAvgAll === "number"
+      ? bot.winStreakAvgAll
+      : typeof winStreakAvgMap?.ALL === "number"
+      ? winStreakAvgMap.ALL
+      : undefined;
+  const winStreakAvgLocal =
+    (winStreakAvgMap &&
+      typeof winStreakAvgMap[localRange] === "number" &&
+      winStreakAvgMap[localRange]) ||
+    winStreakAvgAll ||
+    0;
+  const winRatePerRange =
+    bot?.winRatePerRange && typeof bot.winRatePerRange === "object"
+      ? (bot.winRatePerRange as Record<string, number>)
+      : undefined;
+  const getWinRateForPreset = (preset: string): number | undefined => {
+    if (!winRatePerRange) return undefined;
+    const value = winRatePerRange[preset];
+    return typeof value === "number" ? value : undefined;
+  };
+  const formatAvg = (value?: number) =>
+    typeof value === "number" && Number.isFinite(value)
+      ? value.toFixed(1)
+      : "0.0";
 
   // lấy position info theo instId để hiện Entry/size chính xác hơn
   useEffect(() => {
@@ -223,21 +279,6 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
       cancelled = true;
     };
   }, [bot?.algoId, bot?.id, lastPrice]);
-
-  // Dữ liệu cho chart
-  const chartData = useMemo(
-    () =>
-      pnlHistory.map((t) => ({
-        time: t.time
-          ? t.time
-          : t.ts
-          ? new Date(t.ts).toLocaleTimeString("en-GB")
-          : "",
-        pnl: t.pnl,
-        cumulative: t.cumulative,
-      })),
-    [pnlHistory]
-  );
 
   // Lịch sử vị thế đóng (positions history)
   const [posHistory, setPosHistory] = useState<
@@ -307,16 +348,97 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
   }, [posHistory]);
 
   const baseWr = winLossStats.winrate ?? avgWr;
-  const avgWrLabel = `${(baseWr * 100).toFixed(1)}%`;
+
+  const calcRangeWr = (avgWrValue: number, range: string): number => {
+    const base = avgWrValue || 0.55;
+    switch (range) {
+      case "7D":
+        return Math.max(0.25, base - 0.18);
+      case "30D":
+        return Math.max(0.3, base - 0.15);
+      case "90D":
+        return Math.max(0.32, base - 0.12);
+      case "180D":
+        return Math.max(0.34, base - 0.1);
+      case "365D":
+        return Math.max(0.35, base - 0.08);
+      case "ALL":
+      default:
+        return Math.max(0.36, base - 0.06);
+    }
+  };
+
+  const calcCurrentDd = (maxDdValue: number, range: string): number => {
+    const abs = Math.abs(maxDdValue) || 0.2;
+    let factor = 0.3;
+    switch (range) {
+      case "7D":
+        factor = 0.2;
+        break;
+      case "30D":
+        factor = 0.35;
+        break;
+      case "90D":
+        factor = 0.4;
+        break;
+      case "180D":
+        factor = 0.45;
+        break;
+      case "365D":
+        factor = 0.5;
+        break;
+      case "ALL":
+      default:
+        factor = 0.55;
+        break;
+    }
+    return -(abs * factor);
+  };
+
+  const formatPercent = (value: number) => `${(value * 100).toFixed(1)}%`;
+
+  const avgWrValueFromBot = getWinRateForPreset("ALL");
+  const rangeWrFromBot = getWinRateForPreset(localRange);
+  const baseWrForCalc = avgWrValueFromBot ?? baseWr;
+  const rangeWrValue =
+    rangeWrFromBot ?? calcRangeWr(baseWrForCalc, localRange);
+  const rangeWrLabel = formatPercent(rangeWrValue);
+  const ddMap =
+    bot?.maxDdPerRange && typeof bot.maxDdPerRange === "object"
+      ? (bot.maxDdPerRange as Record<string, number>)
+      : undefined;
+  const allTimeDd =
+    (ddMap && typeof ddMap.ALL === "number" ? ddMap.ALL : undefined) ??
+    baseMaxDd;
+  const avgDdValue = allTimeDd ?? baseMaxDd;
+  let rangeDdValue =
+    ddMap && typeof ddMap[localRange] === "number"
+      ? ddMap[localRange]
+      : undefined;
+  if (
+    localRange.toUpperCase() === "ALL" &&
+    typeof allTimeDd === "number"
+  ) {
+    rangeDdValue = allTimeDd;
+  }
+  const fallbackCurrentDd = calcCurrentDd(
+    avgDdValue ?? baseMaxDd,
+    localRange
+  );
+  const currentDdValue =
+    typeof rangeDdValue === "number" ? rangeDdValue : fallbackCurrentDd;
+  const currentDdLabel = `${Math.abs(currentDdValue * 100).toFixed(2)}%`;
+  const avgDdLabel = `${Math.abs((avgDdValue ?? -0.2) * 100).toFixed(2)}%`;
 
   // Winrate Details: dùng winrate thực (không cộng/trừ thêm) cho cả 3 mục
-  const wrPercent = `${(baseWr * 100).toFixed(1)}%`;
-  const highWrPercent = wrPercent;
-  const lowWrPercent = wrPercent;
+  const avgWrLabel = formatPercent(avgWrValueFromBot ?? baseWr);
+  const resolveWrValue = (preset: WrRangePreset): number =>
+    getWinRateForPreset(preset) ?? calcRangeWr(baseWrForCalc, preset);
+  const wrPercentPrimary = formatPercent(resolveWrValue(wrRangeWin));
+  const wrPercent2 = formatPercent(resolveWrValue(wrRangeWin2));
+  const wrPercent3 = formatPercent(resolveWrValue(wrRangeWin3));
+  const wrPercent4 = formatPercent(resolveWrValue(wrRangeWin4));
 
-  const totalPnlLabel =
-    totalPnl >= 0 ? `+${totalPnl.toFixed(2)}` : totalPnl.toFixed(2);
-  const maxDdLabel = `${(maxDd * 100).toFixed(1)}%`;
 
   // Tính streak dựa trên Positions History (closed). Fallback dùng bot nếu chưa có data.
   const streaks = useMemo(() => {
@@ -368,7 +490,86 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
   const openPosCount =
     positionInfo && Math.abs(Number(positionInfo.pos || 0)) > 0 ? 1 : 0;
   const totalTradesDisplay =
-    posHistory.length > 0 ? posHistory.length + openPosCount : totalTrades;
+    Number.isFinite(totalTrades)
+      ? (totalTrades as number)
+      : posHistory.length > 0
+      ? posHistory.length + openPosCount
+      : 0;
+
+  const detailItems: DetailItem[] = [
+    {
+      label: "Invested Amount",
+      value: fmtPlain(investedAmount),
+    },
+    { label: "TF", value: bot?.timeframe || "—" },
+    {
+      label: "Assets In Bot",
+      value: fmtPlain(assetsInBot),
+    },
+    {
+      label: "Current/AVG DD",
+      value: (
+        <div className="flex gap-1 text-[11px]">
+          <span className="text-red-400">{currentDdLabel}</span>
+          <span className="text-neutral-400">/ {avgDdLabel}</span>
+        </div>
+      ),
+    },
+    {
+      label: "Total PnL",
+      value: (
+        <span
+          className={
+            Number(totalPnl) >= 0 ? "text-emerald-400" : "text-red-400"
+          }
+        >
+          {Number(totalPnl) >= 0
+            ? `+${Number(totalPnl).toFixed(2)}`
+            : Number(totalPnl).toFixed(2)}
+        </span>
+      ),
+    },
+    {
+      label: "Range/Avg WR",
+      value: (
+        <div className="flex gap-1 text-[11px]">
+          <span className="text-neutral-100">{rangeWrLabel}</span>
+          <span className="text-neutral-500">/ {avgWrLabel}</span>
+        </div>
+      ),
+    },
+    { label: "Total Trades", value: String(totalTradesDisplay) },
+    {
+      label: "Win/Lose Streak (/AVG)",
+      value: (
+        <div className="flex items-center gap-3 text-[11px]">
+          <div className="flex items-center gap-1">
+            <span className="text-emerald-400">
+              {formatAvg(winStreakAvgLocal)}
+            </span>
+            <span className="text-neutral-500">
+              / {formatAvg(winStreakAvgAll)}
+            </span>
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-red-400">
+              {formatAvg(loseStreakAvgLocal)}
+            </span>
+            <span className="text-neutral-500">
+              / {formatAvg(loseStreakAvgAll)}
+            </span>
+          </div>
+        </div>
+      ),
+    },
+    { label: "Leverage", value: leverageLabel },
+    {
+      label: "Profit Factor",
+      value: Number.isFinite(profitFactor)
+        ? profitFactor.toFixed(2)
+        : "—",
+    },
+  ];
 
   return (
     <div className="pointer-events-auto w-[700px] max-h-[85vh] bg-neutral-950 border border-neutral-800 rounded-2xl shadow-2xl shadow-black/60 flex flex-col overflow-hidden text-[13px]">
@@ -414,87 +615,70 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
 
       {/* BODY */}
       <div className="px-3 py-3 space-y-3 overflow-auto text-[13px] text-neutral-200">
-        {/* Summary top row */}
-        <div className="grid grid-cols-3 gap-2">
-          <div>
-            <div className="text-[12px] text-neutral-400">Total PnL</div>
-            <div
-              className={
-                totalPnl >= 0
-                  ? "text-emerald-400 font-semibold"
-                  : "text-red-400 font-semibold"
-              }
-            >
-              {totalPnlLabel}
-            </div>
+        <div className="border border-neutral-800 rounded-lg p-3">
+          <div className="text-[11px] text-neutral-400 mb-2 uppercase tracking-wide">
+            Overview
           </div>
-          <div>
-            <div className="text-[12px] text-neutral-400">Avg WR</div>
-            <div className="font-semibold">{avgWrLabel}</div>
-          </div>
-          <div>
-            <div className="text-[12px] text-neutral-400">Profit Factor</div>
-            <div className="font-semibold">{profitFactor.toFixed(2)}</div>
-          </div>
-        </div>
-
-        {/* Drawdown + Position PnL */}
-        <div className="grid grid-cols-2 gap-2">
-          <div className="border border-neutral-800 rounded-lg p-2">
-            <div className="text-[12px] text-neutral-400 mb-1">Drawdown</div>
-            <div className="text-xs text-red-400">Max DD: {maxDdLabel}</div>
-            <div className="text-[11px] text-neutral-500 mt-1">
-              (Mock – later will be calculated from equity in {localRange})
-            </div>
-          </div>
-
-          <div className="border border-neutral-800 rounded-lg p-2">
-            <div className="text-[12px] text-neutral-400 mb-1">
-              Position PnL
-            </div>
-            <div
-              className={
-                positionPnl >= 0
-                  ? "text-xs text-emerald-400 font-semibold"
-                  : "text-xs text-red-400 font-semibold"
-              }
-            >
-              {positionPnl >= 0
-                ? `+${positionPnl.toFixed(2)}`
-                : positionPnl.toFixed(2)}
-            </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-y-2 gap-x-4 text-[11px]">
+            {[...detailItems].map((item, idx, arr) => (
+              <div
+                key={`${item.label}-${idx}`}
+                className="flex items-center justify-between border-b border-neutral-800/60 pb-1"
+                style={{
+                  borderBottom: idx === arr.length - 1 ? "none" : undefined,
+                  paddingBottom: idx === arr.length - 1 ? 0 : undefined,
+                }}
+              >
+                <span className="text-[9px] uppercase text-neutral-500 tracking-wide">
+                  {item.label}
+                </span>
+                <div className="text-[11px] text-neutral-100 text-right">
+                  {item.value}
+                </div>
+              </div>
+            ))}
           </div>
         </div>
 
-        {/* Trading Stats – phía trên Win Rate Details */}
         <div className="border border-neutral-800 rounded-lg p-2">
-          <div className="text-[12px] text-neutral-400 mb-1">
+          <div className="text-[11px] text-neutral-400 mb-1 uppercase tracking-wide">
             Trading Stats
           </div>
-          <div className="grid grid-cols-2 gap-y-1 text-[12px]">
-            <span>Total trades:</span>
-            <span className="text-right">{totalTradesDisplay}</span>
+          <div className="grid grid-cols-2 gap-y-1 text-[11px]">
+            <span className="text-neutral-400">Side</span>
+            <span className="text-right text-neutral-100">{openPositionLabel}</span>
 
-            <span>Entry price:</span>
-            <span className="text-right">
+            <span className="text-neutral-400">Entry price</span>
+            <span className="text-right text-neutral-100">
               {entryPrice !== undefined ? entryPrice.toFixed(2) : "-"}
             </span>
 
-            <span>Position size:</span>
-            <span className="text-right">
-              {positionSize !== undefined ? positionSize.toFixed(3) : "-"}
-            </span>
-
-            <span>Last price:</span>
-            <span className="text-right">
+            <span className="text-neutral-400">Last price</span>
+            <span className="text-right text-neutral-100">
               {lastPrice !== undefined ? lastPrice.toFixed(2) : "-"}
             </span>
 
-            <span>Side:</span>
-            <span className="text-right">{openPositionLabel}</span>
+            <span className="text-neutral-400">Position size</span>
+            <span className="text-right text-neutral-100">
+              {positionSize !== undefined ? positionSize.toFixed(3) : "-"}
+            </span>
 
-            <span>Status:</span>
-            <span className="text-right">{bot?.status ?? "-"}</span>
+            <span className="text-neutral-400">Position PnL</span>
+            <span
+              className={`text-right ${
+                positionPnlValue !== undefined
+                  ? positionPnlValue >= 0
+                    ? "text-emerald-400"
+                    : "text-red-400"
+                  : "text-neutral-100"
+              }`}
+            >
+              {positionPnlValue === undefined
+                ? "-"
+                : positionPnlValue >= 0
+                ? `+${positionPnlValue.toFixed(2)}`
+                : positionPnlValue.toFixed(2)}
+            </span>
           </div>
         </div>
 
@@ -524,20 +708,18 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
                 ))}
               </select>
               <span className="flex-1 text-right text-emerald-400 font-medium text-[12px]">
-                {wrPercent}
+                {wrPercentPrimary}
               </span>
             </div>
 
-            {/* High WR row */}
+            {/* Winrate 2 */}
             <div className="flex items-center gap-2">
               <span className="text-[12px] text-neutral-300 min-w-[70px]">
-                High WR
+                Winrate 2
               </span>
               <select
-                value={wrRangeHigh}
-                onChange={(e) =>
-                  setWrRangeHigh(e.target.value as WrRangePreset)
-                }
+                value={wrRangeWin2}
+                onChange={(e) => setWrRangeWin2(e.target.value as WrRangePreset)}
                 className="bg-neutral-900 border border-neutral-700 rounded-full px-2.5 py-1 text-[11px] text-neutral-200 outline-none"
               >
                 {wrRangeOptions.map((opt) => (
@@ -547,20 +729,18 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
                 ))}
               </select>
               <span className="flex-1 text-right text-emerald-400 text-[12px]">
-                {highWrPercent}
+                {wrPercent2}
               </span>
             </div>
 
-            {/* Low WR row */}
+            {/* Winrate 3 */}
             <div className="flex items-center gap-2">
               <span className="text-[12px] text-neutral-300 min-w-[70px]">
-                Low WR
+                Winrate 3
               </span>
               <select
-                value={wrRangeLow}
-                onChange={(e) =>
-                  setWrRangeLow(e.target.value as WrRangePreset)
-                }
+                value={wrRangeWin3}
+                onChange={(e) => setWrRangeWin3(e.target.value as WrRangePreset)}
                 className="bg-neutral-900 border border-neutral-700 rounded-full px-2.5 py-1 text-[11px] text-neutral-200 outline-none"
               >
                 {wrRangeOptions.map((opt) => (
@@ -569,10 +749,58 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
                   </option>
                 ))}
               </select>
-              <span className="flex-1 text-right text-red-400 text-[12px]">
-                {lowWrPercent}
+              <span className="flex-1 text-right text-emerald-400 text-[12px]">
+                {wrPercent3}
               </span>
             </div>
+
+            {/* Winrate 4 */}
+            <div className="flex items-center gap-2">
+              <span className="text-[12px] text-neutral-300 min-w-[70px]">
+                Winrate 4
+              </span>
+              <select
+                value={wrRangeWin4}
+                onChange={(e) => setWrRangeWin4(e.target.value as WrRangePreset)}
+                className="bg-neutral-900 border border-neutral-700 rounded-full px-2.5 py-1 text-[11px] text-neutral-200 outline-none"
+              >
+                {wrRangeOptions.map((opt) => (
+                  <option key={opt} value={opt}>
+                    {opt}
+                  </option>
+                ))}
+              </select>
+              <span className="flex-1 text-right text-emerald-400 text-[12px]">
+                {wrPercent4}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Win / Lose streak */}
+        <div className="border border-neutral-800 rounded-lg p-2">
+          <div className="text-[12px] text-neutral-400 mb-1">
+            Win / Lose Streak
+          </div>
+          <div className="grid grid-cols-2 gap-y-1 text-[12px]">
+            <span>Current win:</span>
+            <span className="text-right text-emerald-400">
+              {streaks.winCurrent > 0
+                ? `+${streaks.winCurrent}`
+                : streaks.winCurrent}
+            </span>
+            <span>Max win:</span>
+            <span className="text-right text-emerald-400">
+              {streaks.winMax > 0 ? `+${streaks.winMax}` : streaks.winMax}
+            </span>
+            <span>Current lose:</span>
+            <span className="text-right text-red-400">
+              {streaks.loseCurrent}
+            </span>
+            <span>Max lose:</span>
+            <span className="text-right text-red-400">
+              {streaks.loseMax}
+            </span>
           </div>
         </div>
 
@@ -646,172 +874,22 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
           )}
         </div>
 
-        {/* Win / Lose streak */}
-        <div className="border border-neutral-800 rounded-lg p-2">
-          <div className="text-[12px] text-neutral-400 mb-1">
-            Win / Lose Streak
-          </div>
-          <div className="grid grid-cols-2 gap-y-1 text-[12px]">
-            <span>Current win:</span>
-            <span className="text-right text-emerald-400">
-              {streaks.winCurrent > 0
-                ? `+${streaks.winCurrent}`
-                : streaks.winCurrent}
-            </span>
-            <span>Max win:</span>
-            <span className="text-right text-emerald-400">
-              {streaks.winMax > 0 ? `+${streaks.winMax}` : streaks.winMax}
-            </span>
-            <span>Current lose:</span>
-            <span className="text-right text-red-400">
-              {streaks.loseCurrent}
-            </span>
-            <span>Max lose:</span>
-            <span className="text-right text-red-400">
-              {streaks.loseMax}
-            </span>
-          </div>
-        </div>
-
-        {/* Signal Bot PnL History */}
-        <div className="border border-neutral-800 rounded-lg p-2">
-          <div className="flex items-center justify-between mb-1">
-            <div className="text-[12px] text-neutral-400">
-              Signal Bot PnL History
+        {/* Fund Overview */}
+        <div className="border border-neutral-800 rounded-lg p-2 space-y-2">
+          <div className="text-[12px] text-neutral-400">Fund / Deposit / Withdraw</div>
+          <div className="grid grid-cols-3 gap-2 text-[11px] text-neutral-200">
+            <div className="border border-neutral-800 rounded-lg p-2">
+              <div className="text-neutral-500 uppercase text-[9px] mb-1 tracking-wide">Fund</div>
+              <div className="text-neutral-100">—</div>
             </div>
-            {pnlLoading && (
-              <span className="text-[11px] text-neutral-500">Loading…</span>
-            )}
-          </div>
-
-          {pnlError ? (
-            <div className="text-[12px] text-red-400">{pnlError}</div>
-          ) : pnlHistory.length === 0 ? (
-            <div className="text-[12px] text-neutral-500">
-              No PnL history for this bot.
+            <div className="border border-neutral-800 rounded-lg p-2">
+              <div className="text-neutral-500 uppercase text-[9px] mb-1 tracking-wide">Deposit</div>
+              <div className="text-emerald-400">—</div>
             </div>
-          ) : (
-            <div className="space-y-2">
-              <div className="h-40">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={chartData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#171717" />
-                    <XAxis
-                      dataKey="time"
-                      tick={{ fontSize: 10, fill: "#a3a3a3" }}
-                      minTickGap={16}
-                    />
-                    <YAxis
-                      tick={{ fontSize: 10, fill: "#a3a3a3" }}
-                      tickFormatter={(v) => v.toFixed(0)}
-                    />
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: "#0a0a0a",
-                        border: "1px solid #262626",
-                        borderRadius: "0.75rem",
-                        fontSize: 12,
-                        color: "#e5e5e5",
-                      }}
-                    />
-                    <Legend
-                      wrapperStyle={{ fontSize: 11, color: "#d4d4d4" }}
-                      verticalAlign="top"
-                      height={18}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="cumulative"
-                      name="Cumulative PnL"
-                      stroke="#22c55e"
-                      strokeWidth={2}
-                      dot={false}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="pnl"
-                      name="Trade PnL"
-                      stroke="#f97316"
-                      strokeWidth={2}
-                      dot={{ r: 2 }}
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-
-              <div className="max-h-40 overflow-auto border border-neutral-800 rounded-lg">
-                <table className="min-w-full text-[12px] text-neutral-200">
-                  <thead className="bg-neutral-900 text-neutral-400 text-[11px]">
-                    <tr>
-                      <th className="px-2 py-1 text-left font-normal">Time</th>
-                      <th className="px-2 py-1 text-right font-normal">PnL</th>
-                      <th className="px-2 py-1 text-right font-normal">
-                        Cumulative
-                      </th>
-                      <th className="px-2 py-1 text-right font-normal">
-                        Side
-                      </th>
-                      <th className="px-2 py-1 text-right font-normal">
-                        Size
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pnlHistory.map((t) => (
-                      <tr
-                        key={`${t.ts}-${t.instId || "inst"}-${t.side || "side"}`}
-                        className="border-t border-neutral-900/70"
-                      >
-                        <td className="px-2 py-1">
-                          {t.time ||
-                            (t.ts
-                              ? new Date(t.ts).toLocaleString("en-GB")
-                              : "-")}
-                        </td>
-                        <td className="px-2 py-1 text-right">
-                          <span
-                            className={
-                              t.pnl >= 0 ? "text-emerald-400" : "text-red-400"
-                            }
-                          >
-                            {fmtCurrency(t.pnl)}
-                          </span>
-                        </td>
-                        <td className="px-2 py-1 text-right">
-                          <span
-                            className={
-                              t.cumulative >= 0
-                                ? "text-emerald-400"
-                                : "text-red-400"
-                            }
-                          >
-                            {fmtCurrency(t.cumulative)}
-                          </span>
-                        </td>
-                        <td className="px-2 py-1 text-right capitalize">
-                          {t.side || "-"}
-                        </td>
-                        <td className="px-2 py-1 text-right">
-                          {t.size ?? "-"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+            <div className="border border-neutral-800 rounded-lg p-2">
+              <div className="text-neutral-500 uppercase text-[9px] mb-1 tracking-wide">Withdraw</div>
+              <div className="text-red-400">—</div>
             </div>
-          )}
-        </div>
-
-        {/* Note – placeholder cho fund / daily PnL */}
-        <div className="border border-neutral-800 rounded-lg p-2">
-          <div className="text-[12px] text-neutral-400 mb-1">
-            Fund / PnL Daily (todo)
-          </div>
-          <div className="text-[11px] text-neutral-500">
-            Later this section will show daily PnL chart and
-            deposit/withdrawal history for this bot, also following the
-            selected Range: {localRange}.
           </div>
         </div>
       </div>

@@ -1,5 +1,5 @@
 // src/modules/fund/FundManagement.tsx
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   ResponsiveContainer,
   AreaChart,
@@ -17,7 +17,8 @@ import {
   fundEquityHistoryMock,
   type EquityHistoryPoint,
 } from "./fundMockData";
-import BotTable, { type Bot } from "../bots/BotTable";
+import { type Bot } from "../bots/BotTable";
+import { fetchPortfolioPnlHistory } from "../../okxClient";
 
 // ===============================
 // Types
@@ -37,6 +38,7 @@ type FundManagementProps = {
   fundMetrics?: {
     totalEquity?: number;
     balance?: number;
+    realTimePnl?: number;
     openPositions?: number;
     activeBots?: number;
     totalPnl?: number;
@@ -92,6 +94,39 @@ export const FundManagement: React.FC<FundManagementProps> = ({
 
   // Local range (fund only)
   const [range, setRange] = useState<LocalRangePreset>("30D");
+  const [portfolioPnlAllTime, setPortfolioPnlAllTime] = useState<number | null>(
+    null
+  );
+
+  // lấy PnL history (all bots, range ALL) để cộng vào Balance
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadAllRangePnl = async () => {
+      try {
+        const trades = await fetchPortfolioPnlHistory({ range: "ALL" });
+        if (cancelled) return;
+        const last = trades[trades.length - 1];
+        const cumulative = Number(
+          last?.cumulative ??
+            trades.reduce((sum, trade) => sum + Number(trade.pnl || 0), 0)
+        );
+        setPortfolioPnlAllTime(Number.isFinite(cumulative) ? cumulative : 0);
+      } catch (err) {
+        console.warn("⚠️ Failed to fetch ALL-range PnL history:", err);
+        if (!cancelled) {
+          setPortfolioPnlAllTime(0);
+        }
+      }
+    };
+
+    loadAllRangePnl();
+    const id = setInterval(loadAllRangePnl, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
 
   // mock fallback
   const baseMetrics = fundMetrics ?? fundMetricsMock;
@@ -101,7 +136,7 @@ export const FundManagement: React.FC<FundManagementProps> = ({
       : fundEquityHistoryMock;
 
   // apply range filtering
-  const equitySource = filterByRange(equityRaw, range).map((d, idx, arr) => {
+  const equitySource = filterByRange(equityRaw, range).map((d, _, arr) => {
     // nếu totalPnl chưa có, tính chênh lệch so với điểm đầu trong phạm vi
     if (d.totalPnl === undefined && arr.length > 0) {
       const first = arr[0];
@@ -120,11 +155,21 @@ export const FundManagement: React.FC<FundManagementProps> = ({
   // Recalculate metrics by current range
   // ===============================
   const latestEquityPoint = equitySource[equitySource.length - 1];
-  const firstEquityPoint = equitySource[0];
 
   // Aggregate từ Bot List
   const aggregateFromBots = () => {
     if (!bots.length) return null;
+    const getBotTrades = (bot: Bot) => {
+      const total = Number(bot.totalTrades);
+      if (Number.isFinite(total)) {
+        return total;
+      }
+      const closed = Number(bot.totalTradesClosed ?? 0);
+      const openFallback = bot.totalTradesOpen ?? (bot.hasOpenPosition ? 1 : 0);
+      const open = Number(openFallback ?? 0);
+      const fallback = closed + open;
+      return fallback > 0 ? fallback : 0;
+    };
     const runningBots = bots.filter(
       (b) =>
         typeof b.status === "string" &&
@@ -139,22 +184,26 @@ export const FundManagement: React.FC<FundManagementProps> = ({
       (s, b) => s + Number(b.totalPnl || 0),
       0
     );
-    const totalEquityFromBots = bots.reduce(
-      (s, b) =>
-        s +
-        (Number(b.investedAmount || 0) + Number(b.totalPnl || 0)),
+    // Balance = tổng vốn đã deploy + PnL history (all bots, all time).
+    const totalInvestedFromBots = bots.reduce((sum, bot) => {
+      const invested = Number(bot.investedAmount ?? 0);
+      return Number.isFinite(invested) ? sum + invested : sum;
+    }, 0);
+    const hasAllRangePnl =
+      portfolioPnlAllTime !== null && Number.isFinite(portfolioPnlAllTime);
+    const realizedPnlAllRange = hasAllRangePnl
+      ? (portfolioPnlAllTime as number)
+      : totalPnlFromBots;
+    const balanceFromBots = totalInvestedFromBots + realizedPnlAllRange;
+    const realTimePnlFromBots = bots.reduce(
+      (sum, bot) => sum + Number(bot.closedPnlAllTime ?? 0),
       0
     );
-    const balanceFromBots = bots.reduce(
-      (s, b) => s + Number(b.investedAmount || 0),
-      0
-    );
-    const tradesSum = bots.reduce(
-      (s, b) => s + Number(b.totalTrades || 0),
-      0
-    );
+    const totalEquityFromBots =
+      totalInvestedFromBots + realTimePnlFromBots + totalPnlFromBots;
+    const tradesSum = bots.reduce((s, b) => s + getBotTrades(b), 0);
     const winTrades = bots.reduce((s, b) => {
-      const trades = Number(b.totalTrades || 0);
+      const trades = getBotTrades(b);
       const wr = Number((b as any).avgWr || 0);
       return s + trades * wr;
     }, 0);
@@ -167,6 +216,8 @@ export const FundManagement: React.FC<FundManagementProps> = ({
       totalPnlFromBots,
       totalEquityFromBots,
       balanceFromBots,
+      realTimePnlFromBots,
+      initialFromBots: totalInvestedFromBots,
       winrate,
     };
   };
@@ -182,11 +233,19 @@ export const FundManagement: React.FC<FundManagementProps> = ({
       0,
     balance:
       botAgg?.balanceFromBots !== undefined
-        ? botAgg.balanceFromBots + (botAgg.totalPnlFromBots || 0)
+        ? botAgg.balanceFromBots
         : latestEquityPoint?.balance ?? baseMetrics.balance ?? 0,
+    initial:
+      botAgg?.initialFromBots !== undefined
+        ? botAgg.initialFromBots
+        : baseMetrics.balance ?? 0,
     totalPnl:
       botAgg?.totalPnlFromBots ??
       baseMetrics.totalPnl ??
+      0,
+    realTimePnl:
+      botAgg?.realTimePnlFromBots ??
+      baseMetrics.realTimePnl ??
       0,
     openPositions: botAgg?.openPositions ?? baseMetrics.openPositions ?? 0,
     activeBots: botAgg?.activeBots ?? baseMetrics.activeBots ?? 0,
@@ -260,11 +319,13 @@ export const FundManagement: React.FC<FundManagementProps> = ({
               </div>
             </div>
 
-            {/* Balance */}
+            {/* Initial Investment */}
             <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4">
-              <div className="text-xs text-neutral-500">Balance</div>
+              <div className="text-xs text-neutral-500">
+                Initial Investment
+              </div>
               <div className="mt-1 text-base font-semibold text-neutral-50">
-                {formatCurrency(metricsRange.balance, currency)}
+                {formatCurrency(metricsRange.initial, currency)}
               </div>
             </div>
 
@@ -284,9 +345,11 @@ export const FundManagement: React.FC<FundManagementProps> = ({
               </div>
             </div>
 
-            {/* Total PnL */}
+            {/* Total PnL Unrealline */}
             <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4">
-              <div className="text-xs text-neutral-500">Total PnL</div>
+              <div className="text-xs text-neutral-500">
+                Total PnL Unrealline
+              </div>
               <div
                 className={
                   "mt-1 text-base font-semibold " +
@@ -298,6 +361,23 @@ export const FundManagement: React.FC<FundManagementProps> = ({
                 }
               >
                 {formatCurrency(metricsRange.totalPnl, currency)}
+              </div>
+            </div>
+
+            {/* Total Profit */}
+            <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4">
+              <div className="text-xs text-neutral-500">Total Profit</div>
+              <div
+                className={
+                  "mt-1 text-base font-semibold " +
+                  (metricsRange.realTimePnl > 0
+                    ? "text-emerald-400"
+                    : metricsRange.realTimePnl < 0
+                    ? "text-red-400"
+                    : "text-neutral-50")
+                }
+              >
+                {formatCurrency(metricsRange.realTimePnl, currency)}
               </div>
             </div>
 
@@ -335,7 +415,7 @@ export const FundManagement: React.FC<FundManagementProps> = ({
                 Fund Overview
               </div>
               <div className="text-xs text-neutral-500">
-                Total Equity / Total PnL
+                Total Equity / Total PnL Unrealline
               </div>
             </div>
 
@@ -403,7 +483,7 @@ export const FundManagement: React.FC<FundManagementProps> = ({
                   <Area
                     type="monotone"
                     dataKey="totalPnl"
-                    name="Total PnL"
+                    name="Total PnL Unrealline"
                     stroke="#f97316"
                     fill="url(#totalpnl)"
                     strokeWidth={2}

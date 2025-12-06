@@ -7,31 +7,166 @@ type CoinTab = "BTC" | "ETH";
 type RangePreset = "7D" | "30D" | "90D" | "180D" | "365D" | "ALL";
 
 const API_BASE = getApiBase();
+const RANGE_PRESETS: RangePreset[] = ["7D", "30D", "90D", "180D", "365D", "ALL"];
+const DAY_MS = 24 * 60 * 60 * 1000;
+const RANGE_TO_MS: Record<RangePreset, number | null> = {
+  "7D": 7 * DAY_MS,
+  "30D": 30 * DAY_MS,
+  "90D": 90 * DAY_MS,
+  "180D": 180 * DAY_MS,
+  "365D": 365 * DAY_MS,
+  ALL: null,
+};
 
-// Tính win/lose streak từ lịch sử vị thế đã đóng
-const computeStreakFromHistory = (
+type HistoryEntry = { pnl: number; ts: number };
+
+const normalizeHistoryEntries = (
   rows: Array<{ pnl?: number; cTime?: number; uTime?: number; closeTs?: number }>
+): HistoryEntry[] =>
+  rows
+    .map((row) => ({
+      pnl: Number(row.pnl || 0),
+      ts: Number(row.closeTs || row.uTime || row.cTime || 0),
+    }))
+    .filter((item) => Number.isFinite(item.pnl) && Number.isFinite(item.ts) && item.ts > 0)
+    .sort((a, b) => a.ts - b.ts);
+
+const calcAvgForRange = (
+  entries: HistoryEntry[],
+  maxAgeMs: number | null,
+  now: number,
+  predicate: (pnl: number) => boolean
+) => {
+  let sequences: number[] = [];
+  let cur = 0;
+  for (const entry of entries) {
+    if (maxAgeMs !== null && now - entry.ts > maxAgeMs) {
+      continue;
+    }
+    if (predicate(entry.pnl)) {
+      cur += 1;
+    } else {
+      if (cur > 0) {
+        sequences.push(cur);
+        cur = 0;
+      }
+    }
+  }
+  if (cur > 0) sequences.push(cur);
+  if (!sequences.length) return 0;
+  return sequences.reduce((sum, item) => sum + item, 0) / sequences.length;
+};
+
+const calcWinRateForRange = (
+  entries: HistoryEntry[],
+  maxAgeMs: number | null,
+  now: number
+) => {
+  let win = 0;
+  let total = 0;
+  for (const entry of entries) {
+    if (maxAgeMs !== null && now - entry.ts > maxAgeMs) {
+      continue;
+    }
+    if (entry.pnl > 0) {
+      win += 1;
+      total += 1;
+    } else if (entry.pnl < 0) {
+      total += 1;
+    }
+  }
+  if (total === 0) return 0;
+  return win / total;
+};
+
+const calcDrawdownForRange = (
+  series: { ts: number; equity: number }[],
+  maxAgeMs: number | null,
+  now: number
+) => {
+  const filtered =
+    maxAgeMs === null ? series : series.filter((pt) => now - pt.ts <= maxAgeMs);
+  if (!filtered.length) return 0;
+  let peak = filtered[0].equity;
+  let maxDd = 0;
+  for (const pt of filtered) {
+    if (pt.equity > peak) {
+      peak = pt.equity;
+    }
+    if (peak > 0) {
+      const dd = (pt.equity - peak) / peak;
+      if (dd < maxDd) maxDd = dd;
+    }
+  }
+  return maxDd;
+};
+
+const calcRangeStats = (entries: HistoryEntry[], baseEquity: number) => {
+  const now = Date.now();
+  const lose: Record<RangePreset, number> = {} as Record<RangePreset, number>;
+  const win: Record<RangePreset, number> = {} as Record<RangePreset, number>;
+  const winRate: Record<RangePreset, number> = {} as Record<RangePreset, number>;
+  const equitySeries: { ts: number; equity: number }[] = [];
+  let cumulative = 0;
+  let peakEquity = baseEquity;
+  let maxDrawdown = 0;
+  for (const entry of entries) {
+    cumulative += entry.pnl;
+    const equity = baseEquity + cumulative;
+    equitySeries.push({ ts: entry.ts, equity });
+    if (equity > peakEquity) {
+      peakEquity = equity;
+    }
+    if (peakEquity > 0) {
+      const dd = (equity - peakEquity) / peakEquity;
+      if (dd < maxDrawdown) maxDrawdown = dd;
+    }
+  }
+  RANGE_PRESETS.forEach((preset) => {
+    const limit = RANGE_TO_MS[preset];
+    lose[preset] = calcAvgForRange(entries, limit, now, (pnl) => pnl < 0);
+    win[preset] = calcAvgForRange(entries, limit, now, (pnl) => pnl > 0);
+    winRate[preset] = calcWinRateForRange(entries, limit, now);
+  });
+  const drawdownPerRange: Record<RangePreset, number> =
+    {} as Record<RangePreset, number>;
+  RANGE_PRESETS.forEach((preset) => {
+    const limit = RANGE_TO_MS[preset];
+    drawdownPerRange[preset] = calcDrawdownForRange(
+      equitySeries,
+      limit,
+      now
+    );
+  });
+  return { lose, win, winRate, drawdownPerRange, maxDrawdown };
+};
+
+// Tính win/lose streak + drawdown từ lịch sử vị thế đã đóng
+const computeStreakFromHistory = (
+  rows: Array<{ pnl?: number; cTime?: number; uTime?: number; closeTs?: number }>,
+  initialEquity?: number,
+  investedAmount?: number
 ) => {
   if (!rows.length) return null;
-
-  const sorted = [...rows].sort(
-    (a, b) =>
-      (a.closeTs || a.uTime || a.cTime || 0) -
-      (b.closeTs || b.uTime || b.cTime || 0)
-  );
+  const entries = normalizeHistoryEntries(rows);
+  if (!entries.length) return null;
 
   let curWin = 0;
   let curLose = 0;
   let maxWin = 0;
   let maxLose = 0;
-
-  for (const r of sorted) {
-    const pnl = Number(r.pnl || 0);
-    if (pnl > 0) {
+  const baseEquity =
+    typeof initialEquity === "number" && initialEquity > 0
+      ? initialEquity
+      : typeof investedAmount === "number" && investedAmount > 0
+      ? investedAmount
+      : 1;
+  for (const entry of entries) {
+    if (entry.pnl > 0) {
       curWin += 1;
       maxWin = Math.max(maxWin, curWin);
       curLose = 0;
-    } else if (pnl < 0) {
+    } else if (entry.pnl < 0) {
       curLose += 1;
       maxLose = Math.max(maxLose, curLose);
       curWin = 0;
@@ -41,11 +176,26 @@ const computeStreakFromHistory = (
     }
   }
 
+  const {
+    lose: loseAvgPerRange,
+    win: winAvgPerRange,
+    winRate: winRatePerRange,
+    drawdownPerRange,
+    maxDrawdown,
+  } = calcRangeStats(entries, baseEquity);
+  const totalClosedPnl = entries.reduce((sum, entry) => sum + entry.pnl, 0);
+
   return {
     winCurrent: curWin,
     winMax: Math.max(maxWin, curWin),
     loseCurrent: curLose,
     loseMax: Math.max(maxLose, curLose),
+    loseAvgPerRange,
+    winAvgPerRange,
+    winRatePerRange,
+    maxDrawdown,
+    maxDrawdownPerRange: drawdownPerRange,
+    totalClosedPnl,
   };
 };
 
@@ -57,7 +207,7 @@ type BotListProps = {
 
 const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
   const ENABLE_BG_TRADES = true; // bật lấy tổng trades cho Bot List
-  const ENABLE_BG_STREAKS = false;
+  const ENABLE_BG_STREAKS = true;
   const ENABLE_BG_OPEN_POS = true; // bật lấy position + invested amount
   const [coinTab, setCoinTab] = useState<CoinTab>("BTC");
   const [range, setRange] = useState<RangePreset>("30D");
@@ -67,17 +217,17 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  const mergeBotFields = (algoId: string, patch: Partial<Bot>) => {
-    setAllBots((prev) =>
-      prev.map((b) => (b.id === algoId ? { ...b, ...patch } : b))
-    );
-  };
-
   // lấy trạng thái vị thế đang mở cho từng bot
   const loadOpenPositions = async (bots: Bot[]) => {
     const patches: Record<
       string,
-      { hasOpenPosition: boolean; positionPnl?: number }
+      {
+        hasOpenPosition: boolean;
+        positionPnl?: number;
+        position?: "Long" | "Short" | "None";
+        positionSideRaw?: "Long" | "Short" | "None";
+        entryPrice?: number | null;
+      }
     > = {};
 
     for (const b of bots) {
@@ -94,15 +244,50 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
           continue;
         }
         const positions = Array.isArray(json.positions) ? json.positions : [];
-        const hasOpen = positions.some(
-          (p: any) => Math.abs(Number(p.pos || 0)) > 0
-        );
-        const posPnl = positions.length
-          ? Number(positions[0]?.pnl || positions[0]?.floatPnl || 0)
-          : undefined;
+        let hasOpen = false;
+        let positionSide: "Long" | "Short" | "None" = "None";
+        let posPnl: number | undefined = undefined;
+
+        const deriveSide = (p: any): "Long" | "Short" | "None" => {
+          if (!p) return "None";
+          const posSide = String(p.posSide || p.direction || "").toLowerCase();
+          if (posSide.includes("long")) return "Long";
+          if (posSide.includes("short")) return "Short";
+          const size = Number(p.pos || p.totalPos || 0);
+          if (Number.isFinite(size) && Math.abs(size) > 0) {
+            return size > 0 ? "Long" : "Short";
+          }
+          return "None";
+        };
+
+        const openPosition = positions.find((p: any) => {
+          const side = deriveSide(p);
+          if (side === "None") return false;
+          const size = Number(p.pos || p.totalPos || 0);
+          return Number.isFinite(size) && Math.abs(size) > 0;
+        }) || positions.find((p: any) => deriveSide(p) !== "None");
+
+        let entryPrice: number | null = null;
+        if (openPosition) {
+          positionSide = deriveSide(openPosition);
+          hasOpen = positionSide !== "None";
+          posPnl = Number(openPosition.pnl || openPosition.floatPnl || 0);
+          const entry = Number(
+            openPosition.avgPx ||
+              openPosition.openAvgPx ||
+              openPosition.entryPx ||
+              openPosition.avgPrice ||
+              0
+          );
+          entryPrice = Number.isFinite(entry) && entry > 0 ? entry : null;
+        }
+
         patches[b.algoId!] = {
           hasOpenPosition: hasOpen,
           positionPnl: posPnl !== undefined ? posPnl : b.positionPnl,
+          position: positionSide,
+          positionSideRaw: positionSide,
+          entryPrice,
         };
       } catch (err) {
         console.warn(`⚠️ loadOpenPositions failed for ${b.algoId}:`, err);
@@ -121,7 +306,10 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
 
   // lấy invested amount (orders details)
   const loadInvestedAmount = async (bots: Bot[]) => {
-    const patches: Record<string, { investedAmount: number }> = {};
+    const patches: Record<
+      string,
+      { investedAmount: number; leverage?: number | null; assetsInBot?: number }
+    > = {};
 
     for (const b of bots) {
       if (!b.algoId) continue;
@@ -138,11 +326,20 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
         }
         const row = Array.isArray(json.data) ? json.data[0] : null;
         if (row) {
-        const invested = Number(row.investAmt || row.investedAmt || 0);
+          const invested = Number(row.investAmt || row.investedAmt || 0);
+          const lev = Number(
+            row.lever ??
+            row.leverage ??
+            row.leveraged ??
+            row.leverVal ??
+            row.leverageVal ??
+            0
+          );
           patches[b.algoId!] = {
             investedAmount: isFinite(invested) ? invested : 0,
             assetsInBot:
               Number(row.availBal || 0) + Number(row.frozenBal || 0) || 0,
+            leverage: Number.isFinite(lev) && lev > 0 ? lev : null,
           };
         }
       } catch (err) {
@@ -162,12 +359,18 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
 
   // lấy tổng trades từ backend (positions-history + open pos)
   const loadTradesCount = async (bots: Bot[]) => {
-    const patches: Record<string, { totalTrades: number }> = {};
+    const patches: Record<
+      string,
+      { totalTrades: number; totalTradesClosed?: number; totalTradesOpen?: number }
+    > = {};
     const seen = new Set<string>();
+    const patchKeyFor = (bot: Bot) =>
+      bot.credIdx !== undefined ? `${bot.algoId}::${bot.credIdx}` : bot.algoId;
     for (const b of bots) {
       if (!b.algoId) continue;
-      if (seen.has(b.algoId)) continue;
-      seen.add(b.algoId);
+      const patchKey = patchKeyFor(b);
+      if (patchKey && seen.has(patchKey)) continue;
+      if (patchKey) seen.add(patchKey);
       try {
         const res = await fetch(
           `${API_BASE}/api/bot-trades?algoId=${encodeURIComponent(
@@ -180,7 +383,11 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
           continue;
         }
         if (res.ok && typeof json.total === "number") {
-          patches[b.algoId!] = { totalTrades: Number(json.total) };
+          patches[patchKey || b.algoId!] = {
+            totalTrades: Number(json.total),
+            totalTradesClosed: Number(json.closed ?? 0),
+            totalTradesOpen: Number(json.open ?? 0),
+          };
         }
       } catch (err) {
         console.warn(`⚠️ loadTradesCount failed for ${b.algoId}:`, err);
@@ -190,9 +397,11 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
 
     if (Object.keys(patches).length) {
       setAllBots((prev) =>
-        prev.map((bot) =>
-          patches[bot.id] ? { ...bot, ...patches[bot.id] } : bot
-        )
+        prev.map((bot) => {
+          const pk =
+            bot.credIdx !== undefined ? `${bot.id}::${bot.credIdx}` : bot.id;
+          return patches[pk] ? { ...bot, ...patches[pk] } : bot;
+        })
       );
     }
   };
@@ -206,6 +415,14 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
         winStreakMax: number;
         loseStreakCurrent: number;
         loseStreakMax: number;
+        loseStreakAvgAll?: number;
+        loseStreakAvgPerRange?: Record<string, number>;
+        winStreakAvgAll?: number;
+        winStreakAvgPerRange?: Record<string, number>;
+        winRatePerRange?: Record<string, number>;
+        maxDd?: number;
+        maxDdPerRange?: Record<string, number>;
+        closedPnlAllTime?: number;
       }
     > = {};
 
@@ -224,13 +441,40 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const rows = Array.isArray(json.data) ? json.data : [];
-        const streak = computeStreakFromHistory(rows);
+        const baseEquity =
+          typeof b.assetsInBot === "number" && b.assetsInBot > 0
+            ? b.assetsInBot
+            : typeof b.investedAmount === "number" && b.investedAmount > 0
+            ? b.investedAmount
+            : undefined;
+        const streak = computeStreakFromHistory(
+          rows,
+          baseEquity,
+          b.investedAmount ?? undefined
+        );
         if (streak) {
           patches[b.algoId!] = {
             winStreakCurrent: streak.winCurrent,
             winStreakMax: streak.winMax,
             loseStreakCurrent: streak.loseCurrent,
             loseStreakMax: streak.loseMax,
+            loseStreakAvgAll:
+              typeof streak.loseAvgPerRange?.ALL === "number"
+                ? streak.loseAvgPerRange.ALL
+                : undefined,
+            loseStreakAvgPerRange: streak.loseAvgPerRange,
+            winStreakAvgAll:
+              typeof streak.winAvgPerRange?.ALL === "number"
+                ? streak.winAvgPerRange.ALL
+                : undefined,
+            winStreakAvgPerRange: streak.winAvgPerRange,
+            winRatePerRange: streak.winRatePerRange,
+            maxDd:
+              typeof streak.maxDrawdown === "number"
+                ? streak.maxDrawdown
+                : undefined,
+            maxDdPerRange: streak.maxDrawdownPerRange,
+            closedPnlAllTime: streak.totalClosedPnl ?? 0,
           };
         }
       } catch (err) {
@@ -299,6 +543,9 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
           const totalPnl = Number(row.totalPnl || 0);
           const floatPnl = Number(row.floatPnl || 0);
           const realizedPnl = Number(row.realizedPnl || 0);
+          const leverageValue = Number(
+            row.lever ?? row.leverage ?? row.leveraged ?? 0
+          );
 
           // Những field chưa có từ API, tạm mock / default
           const bot: Bot = {
@@ -316,9 +563,12 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
             instType,
             side,
             totalTrades: 0, // sau này có thể tính từ history
+            totalTradesClosed: 0,
+            totalTradesOpen: 0,
             totalPnl: totalPnl, // PnL tổng của bot
             avgWr: 0.55, // tạm default
             maxDd: -0.2, // tạm default
+            maxDdPerRange: {},
             profitFactor: 1.5, // tạm default
             // ưu tiên PnL của lệnh đang mở (floatPnl), fallback realizedPnl
             positionPnl: Number.isFinite(floatPnl) ? floatPnl : realizedPnl,
@@ -333,6 +583,13 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
             investedAmount: Number(row.investAmt || row.investedAmt || 0) || 0,
             assetsInBot:
               Number(row.availBal || 0) + Number(row.frozenBal || 0) || 0,
+            leverage: Number.isFinite(leverageValue) ? leverageValue : null,
+            loseStreakAvgAll: null,
+            loseStreakAvgPerRange: {},
+            winStreakAvgAll: null,
+            winStreakAvgPerRange: {},
+            winRatePerRange: {},
+            closedPnlAllTime: 0,
           };
 
           return bot;

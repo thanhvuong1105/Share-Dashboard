@@ -36,6 +36,8 @@ const App: React.FC = () => {
 
   const [equityHistory, setEquityHistory] = useState<EquityHistoryPoint[]>([]);
   const [bots, setBots] = useState<Bot[]>([]);
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   // Hydrate equity history từ localStorage để giữ data cũ trên chart
   useEffect(() => {
@@ -72,21 +74,30 @@ const App: React.FC = () => {
     };
   };
 
-  // Gọi OKX định kỳ 15s / lần
+  const ACTIVE_POLL_MS = 3000;
+  const IDLE_POLL_MS = 5000;
+
+  // Gọi OKX định kỳ (linh hoạt 3s hoặc 5s)
   useEffect(() => {
     let isMounted = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let fetching = false;
 
     const fetchAndUpdate = async () => {
+      if (fetching) return;
+      fetching = true;
       try {
-        // 1) Fund overview (live)
         const overview = await fetchFundOverview();
         if (!isMounted) return;
 
         setFundMetrics(mapOkxToFundMetrics(overview));
 
-        const nowLabel = new Date().toLocaleString("en-GB", {
+        const now = new Date();
+        const nowLabel = now.toLocaleString("en-GB", {
           hour12: false,
         });
+        setLastUpdated(nowLabel);
+        setFetchError(null);
 
         setEquityHistory((prev) => {
           const next = [
@@ -105,22 +116,33 @@ const App: React.FC = () => {
           }
           return next;
         });
-
-      } catch (err) {
+      } catch (err: any) {
+        if (!isMounted) return;
         console.error("❌ Failed to fetch OKX:", err);
+        setFetchError(err?.message || "Failed to refresh data");
+      } finally {
+        fetching = false;
       }
     };
 
-    // Gọi ngay lần đầu
-    fetchAndUpdate();
+    const scheduleNext = () => {
+      if (timer) clearTimeout(timer);
+      const interval = tab === "fund" ? ACTIVE_POLL_MS : IDLE_POLL_MS;
+      timer = setTimeout(async () => {
+        await fetchAndUpdate();
+        if (!isMounted) return;
+        scheduleNext();
+      }, interval);
+    };
 
-    // Sau đó lặp
-    const id = setInterval(fetchAndUpdate, 15000);
+    fetchAndUpdate();
+    scheduleNext();
+
     return () => {
       isMounted = false;
-      clearInterval(id);
+      if (timer) clearTimeout(timer);
     };
-  }, []);
+  }, [tab]);
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-50">
@@ -132,8 +154,14 @@ const App: React.FC = () => {
             Beta
           </span>
         </div>
-        <div className="text-[11px] text-neutral-400">
-          VN Timezone (GMT+7)
+        <div className="text-[11px] text-neutral-400 flex flex-col items-end">
+          <span>VN Timezone (GMT+7)</span>
+          {lastUpdated && (
+            <span className="text-emerald-400">Last update: {lastUpdated}</span>
+          )}
+          {fetchError && (
+            <span className="text-red-400">Delayed: {fetchError}</span>
+          )}
         </div>
       </header>
 

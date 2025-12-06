@@ -85,6 +85,7 @@ export const fundDailyHistory: FundDailySnapshot[] = [
 export const fundMetricsMock = {
   totalEquity: fundDailyHistory[0].equity,
   balance: fundDailyHistory[0].balance,
+  realTimePnl: 0,
   openPositions: 3,
   activeBots: fundDailyHistory[0].activeBots ?? 5,
   totalPnl:

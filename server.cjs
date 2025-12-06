@@ -1773,63 +1773,102 @@ app.get("/api/bot-trades", async (req, res) => {
       return res.json(cached);
     }
 
-    let closed = 0;
-    try {
-      const handler = (arr) => {
-        let success = false;
-        for (const r of arr) {
-          if (r.json?.code === "0" && Array.isArray(r.json.data)) {
-            closed = r.json.data.length;
-            success = true;
-            break;
-          }
-          if (r.json?.code === "50011") {
+    const credsList =
+      MULTI_CREDS.length > 0
+        ? MULTI_CREDS
+        : [
+            {
+              key: OKX_API_KEY,
+              secret: OKX_SECRET_KEY,
+              pass: OKX_PASSPHRASE,
+            },
+          ];
+
+    const fetchClosedWithCreds = async (creds) => {
+      if (!creds?.key || !creds?.secret || !creds?.pass) {
+        return { ok: false, closed: 0 };
+      }
+      const PAGE_LIMIT = 100;
+      const MAX_PAGES = 20;
+      let beforeCursor = "";
+      let totalClosed = 0;
+      for (let page = 0; page < MAX_PAGES; page++) {
+        const params = new URLSearchParams({
+          algoOrdType: "contract",
+          algoId,
+          limit: String(PAGE_LIMIT),
+        });
+        if (beforeCursor) params.set("before", beforeCursor);
+        const path = '/api/v5/tradingBot/signal/positions-history?' + params.toString();
+        const ts = new Date().toISOString();
+        const sign = signRequestWithCreds(creds, ts, "GET", path);
+        const resp = await fetchOkx(path, {
+          method: "GET",
+          headers: {
+            "OK-ACCESS-KEY": creds.key,
+            "OK-ACCESS-SIGN": sign,
+            "OK-ACCESS-TIMESTAMP": ts,
+            "OK-ACCESS-PASSPHRASE": creds.pass,
+            ...(OKX_SIMULATED ? { "x-simulated-trading": "1" } : {}),
+          },
+        });
+        const json = await resp.json();
+        if (json?.code !== "0" || !Array.isArray(json.data)) {
+          const errCode = json?.code;
+          if (errCode === "50011" || errCode === "51291") {
+            await sleep(400);
+            page -= 1;
             continue;
           }
+          return { ok: false, closed: totalClosed, code: errCode };
         }
-        if (!success) {
-          const firstErr = arr.find((x) => x?.json?.code && x.json.code !== "50011")
-            ?.json?.code;
-          if (firstErr && firstErr !== "50011") {
-            console.warn(
-              "⚠️ bot-trades positions-history failed algoId=" +
-                algoId +
-                ", code=" +
-                firstErr
-            );
-          }
+        const rows = json.data;
+        totalClosed += rows.length;
+        if (rows.length < PAGE_LIMIT) {
+          return { ok: true, closed: totalClosed };
         }
-      };
-      if (credIdxParam !== undefined && MULTI_CREDS.length) {
-        const idx = Number(credIdxParam);
-        const creds = MULTI_CREDS[idx];
-        if (creds) {
-          const params = new URLSearchParams({ algoOrdType: "contract", algoId, limit: "100" });
-          const path = '/api/v5/tradingBot/signal/positions-history?' + params.toString();
-          const ts = new Date().toISOString();
-          const sign = signRequestWithCreds(creds, ts, "GET", path);
-          const resp = await fetchOkx(path, {
-            method: "GET",
-            headers: {
-              "OK-ACCESS-KEY": creds.key,
-              "OK-ACCESS-SIGN": sign,
-              "OK-ACCESS-TIMESTAMP": ts,
-              "OK-ACCESS-PASSPHRASE": creds.pass,
-              ...(OKX_SIMULATED ? { "x-simulated-trading": "1" } : {}),
-            },
-          });
-          const json = await resp.json();
-          handler([{ json, credIdx: idx }]);
+        const last = rows[rows.length - 1] || {};
+        const nextBefore =
+          last.uTime ||
+          last.cTime ||
+          last.closeTime ||
+          last.ts ||
+          last.createdTime ||
+          null;
+        if (!nextBefore) {
+          return { ok: true, closed: totalClosed };
+        }
+        beforeCursor = String(nextBefore);
+        await sleep(120);
+      }
+      return { ok: true, closed: totalClosed };
+    };
+
+    let closed = 0;
+    let resolvedCredIdx =
+      credIdxParam !== undefined ? Number(credIdxParam) : undefined;
+    try {
+      if (resolvedCredIdx !== undefined) {
+        const idx = resolvedCredIdx;
+        const creds = credsList[idx];
+        if (!creds) {
+          throw new Error(`Invalid credIdx ${idx}`);
+        }
+        const result = await fetchClosedWithCreds(creds);
+        if (result.ok) {
+          closed = result.closed;
         }
       } else {
-        await fetchOkxMultiSigned(
-          () => {
-            const params = new URLSearchParams({ algoOrdType: "contract", algoId, limit: "100" });
-            const path = '/api/v5/tradingBot/signal/positions-history?' + params.toString();
-            return { path, method: "GET" };
-          },
-          handler
-        );
+        for (let idx = 0; idx < credsList.length; idx++) {
+          const creds = credsList[idx];
+          if (!creds?.key) continue;
+          const result = await fetchClosedWithCreds(creds);
+          if (result.ok) {
+            closed = result.closed;
+            resolvedCredIdx = idx;
+            if (closed > 0) break;
+          }
+        }
       }
     } catch (err) {
       console.warn("⚠️ bot-trades positions-history error:", err);
@@ -1837,52 +1876,33 @@ app.get("/api/bot-trades", async (req, res) => {
 
     let open = 0;
     try {
-      const handler = (arr) => {
-        let success = false;
-        for (const r of arr) {
-          const json = r.json;
-          if (json?.code === "0" && Array.isArray(json.data)) {
-            const hasOpen = json.data.some((p) => Math.abs(Number(p.pos || 0)) > 0);
-            open = hasOpen ? 1 : 0;
-            success = true;
-            break;
-          }
-          if (json?.code === "51291" || json?.code === "50011") {
-            continue;
-          }
+      const fetchOpenWithCreds = async (creds) => {
+        if (!creds?.key) return false;
+        const params = new URLSearchParams({ algoId, algoOrdType: "contract" });
+        const path = '/api/v5/tradingBot/signal/positions?' + params.toString();
+        const ts = new Date().toISOString();
+        const sign = signRequestWithCreds(creds, ts, "GET", path);
+        const resp = await fetchOkx(path, {
+          method: "GET",
+          headers: {
+            "OK-ACCESS-KEY": creds.key,
+            "OK-ACCESS-SIGN": sign,
+            "OK-ACCESS-TIMESTAMP": ts,
+            "OK-ACCESS-PASSPHRASE": creds.pass,
+            ...(OKX_SIMULATED ? { "x-simulated-trading": "1" } : {}),
+          },
+        });
+        const json = await resp.json();
+        if (json?.code === "0" && Array.isArray(json.data)) {
+          const hasOpen = json.data.some((p) => Math.abs(Number(p.pos || 0)) > 0);
+          open = hasOpen ? 1 : 0;
+          return true;
         }
-        if (!success) {
-          const firstErr = arr.find(
-            (x) => x?.json?.code && x.json.code !== "50011" && x.json.code !== "51291"
-          )?.json?.code;
-          if (firstErr) {
-            console.warn(
-              "⚠️ bot-trades positions failed algoId=" + algoId + ", code=" + firstErr
-            );
-          }
-        }
+        return false;
       };
-      if (credIdxParam !== undefined && MULTI_CREDS.length) {
-        const idx = Number(credIdxParam);
-        const creds = MULTI_CREDS[idx];
-        if (creds) {
-          const params = new URLSearchParams({ algoId, algoOrdType: "contract" });
-          const path = '/api/v5/tradingBot/signal/positions?' + params.toString();
-          const ts = new Date().toISOString();
-          const sign = signRequestWithCreds(creds, ts, "GET", path);
-          const resp = await fetchOkx(path, {
-            method: "GET",
-            headers: {
-              "OK-ACCESS-KEY": creds.key,
-              "OK-ACCESS-SIGN": sign,
-              "OK-ACCESS-TIMESTAMP": ts,
-              "OK-ACCESS-PASSPHRASE": creds.pass,
-              ...(OKX_SIMULATED ? { "x-simulated-trading": "1" } : {}),
-            },
-          });
-          const json = await resp.json();
-          handler([{ json, credIdx: idx }]);
-        }
+
+      if (resolvedCredIdx !== undefined && credsList[resolvedCredIdx]) {
+        await fetchOpenWithCreds(credsList[resolvedCredIdx]);
       } else {
         await fetchOkxMultiSigned(
           () => {
@@ -1890,7 +1910,16 @@ app.get("/api/bot-trades", async (req, res) => {
             const path = '/api/v5/tradingBot/signal/positions?' + params.toString();
             return { path, method: "GET" };
           },
-          handler
+          (arr) => {
+            for (const r of arr) {
+              if (r.json?.code === "0" && Array.isArray(r.json.data)) {
+                const hasOpen = r.json.data.some((p) => Math.abs(Number(p.pos || 0)) > 0);
+                open = hasOpen ? 1 : 0;
+                resolvedCredIdx = r.credIdx;
+                break;
+              }
+            }
+          }
         );
       }
     } catch (err) {
@@ -1900,7 +1929,7 @@ app.get("/api/bot-trades", async (req, res) => {
     const total = closed + open;
     const payload = {
       algoId,
-      credIdx: credIdxParam !== undefined ? Number(credIdxParam) : undefined,
+      credIdx: resolvedCredIdx,
       closed,
       open,
       total,
