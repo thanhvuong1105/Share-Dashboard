@@ -1,9 +1,9 @@
 // src/modules/fund/FundManagement.tsx
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   ResponsiveContainer,
-  AreaChart,
-  Area,
+  LineChart,
+  Line,
   CartesianGrid,
   XAxis,
   YAxis,
@@ -17,7 +17,7 @@ import {
   fundEquityHistoryMock,
   type EquityHistoryPoint,
 } from "./fundMockData";
-import { type Bot } from "../bots/BotTable";
+import { type Bot, type BotPositionHistoryEntry } from "../bots/BotTable";
 import { fetchPortfolioPnlHistory } from "../../okxClient";
 
 // ===============================
@@ -72,6 +72,53 @@ const formatCurrency = (value: number | undefined, currency = "USDT") => {
 const formatPercent = (value: number | undefined) => {
   if (value === undefined || isNaN(value)) return "-";
   return (value * 100).toFixed(2) + "%";
+};
+
+const collectPositionHistory = (bots: Bot[]): BotPositionHistoryEntry[] =>
+  bots
+    .flatMap((bot) =>
+      (bot.positionHistory ?? []).map((entry) => ({
+        pnl: Number(entry.pnl || 0),
+        closeTs: Number(entry.closeTs || 0),
+      }))
+    )
+    .filter(
+      (entry) =>
+        Number.isFinite(entry.pnl) &&
+        Number.isFinite(entry.closeTs) &&
+        entry.closeTs > 0
+    );
+
+const calcMaxDrawdownFromHistory = (
+  history: BotPositionHistoryEntry[],
+  initialEquity: number
+): number | undefined => {
+  if (!history.length) return undefined;
+  const sorted = [...history].sort((a, b) => a.closeTs - b.closeTs);
+  const startingEquity =
+    Number.isFinite(initialEquity) && initialEquity > 0
+      ? initialEquity
+      : 1;
+  let equity = startingEquity;
+  let peak = startingEquity;
+  let maxDrawdown = 0;
+
+  for (const entry of sorted) {
+    const pnl = Number(entry.pnl);
+    if (!Number.isFinite(pnl)) continue;
+    equity += pnl;
+    if (equity > peak) {
+      peak = equity;
+    }
+    if (peak > 0) {
+      const dd = (equity - peak) / peak;
+      if (dd < maxDrawdown) {
+        maxDrawdown = dd;
+      }
+    }
+  }
+
+  return maxDrawdown;
 };
 
 // Filter Equity theo Range
@@ -169,6 +216,14 @@ export const FundManagement: React.FC<FundManagementProps> = ({
     }
     return d;
   });
+  const equityChartData = useMemo(
+    () =>
+      equitySource.map((point) => ({
+        time: point.time,
+        equityValue: Number(point.totalEquity ?? 0),
+      })),
+    [equitySource]
+  );
 
   // ===============================
   // Recalculate metrics by current range
@@ -265,22 +320,11 @@ export const FundManagement: React.FC<FundManagementProps> = ({
         ? Math.max(0, Math.min(1, totalWins / totalClosedTrades))
         : 0;
 
-    const validDrawdowns = mergedBots
-      .map((bot) => {
-        const direct = Number(bot.maxDd);
-        if (Number.isFinite(direct)) {
-          return direct;
-        }
-        const fromRange = bot.maxDdPerRange?.ALL;
-        const rangeValue = Number(fromRange);
-        return Number.isFinite(rangeValue) ? rangeValue : undefined;
-      })
-      .filter((val): val is number => Number.isFinite(val));
-    const maxDrawdownFromBots =
-      validDrawdowns.length > 0
-        ? validDrawdowns.reduce((sum, val) => sum + val, 0) /
-          validDrawdowns.length
-        : undefined;
+    const portfolioHistory = collectPositionHistory(mergedBots);
+    const maxDrawdownFromBots = calcMaxDrawdownFromHistory(
+      portfolioHistory,
+      totalInvestedFromBots
+    );
 
     return {
       activeBots,
@@ -500,42 +544,23 @@ export const FundManagement: React.FC<FundManagementProps> = ({
             </div>
           </div>
 
-          {/* ==========================
-              FUND OVERVIEW CHART
-          ========================== */}
-          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4">
-            <div className="flex items-center justify-between mb-4">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden">
+            <div className="px-4 py-3 border-b border-neutral-800 flex items-center justify-between bg-neutral-900/70">
               <div className="text-sm font-semibold text-neutral-100">
-                Fund Overview
+                Fund Overview · Equity Chart
               </div>
-              <div className="text-xs text-neutral-500">
-                Total Equity / Total PnL Unrealline
-              </div>
+              <div className="text-xs text-neutral-500">Total Equity</div>
             </div>
 
-            <div className="h-64">
+            <div className="h-64 px-2 py-3">
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={equitySource}>
-                  <defs>
-                    <linearGradient id="equity" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#22c55e" stopOpacity={0.6} />
-                      <stop offset="95%" stopColor="#22c55e" stopOpacity={0} />
-                    </linearGradient>
-
-                    <linearGradient id="totalpnl" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#f97316" stopOpacity={0.6} />
-                      <stop offset="95%" stopColor="#f97316" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-
+                <LineChart data={equityChartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#171717" />
-
                   <XAxis
                     dataKey="time"
                     tick={{ fontSize: 11, fill: "#a3a3a3" }}
                     minTickGap={24}
                   />
-
                   <YAxis
                     tick={{ fontSize: 11, fill: "#a3a3a3" }}
                     tickFormatter={(v) =>
@@ -544,7 +569,6 @@ export const FundManagement: React.FC<FundManagementProps> = ({
                       })
                     }
                   />
-
                   <Tooltip
                     contentStyle={{
                       backgroundColor: "#0a0a0a",
@@ -558,34 +582,28 @@ export const FundManagement: React.FC<FundManagementProps> = ({
                       formatCurrency(value as number, currency)
                     }
                   />
-
                   <Legend
                     wrapperStyle={{ fontSize: 12, color: "#d4d4d4" }}
                     verticalAlign="top"
                     height={24}
                   />
-
-                  <Area
+                  <Line
                     type="monotone"
-                    dataKey="totalEquity"
+                    dataKey="equityValue"
                     name="Total Equity"
                     stroke="#22c55e"
-                    fill="url(#equity)"
                     strokeWidth={2}
+                    dot={{ r: 2 }}
+                    activeDot={{ r: 3 }}
                   />
-
-                  <Area
-                    type="monotone"
-                    dataKey="totalPnl"
-                    name="Total PnL Unrealline"
-                    stroke="#f97316"
-                    fill="url(#totalpnl)"
-                    strokeWidth={2}
-                  />
-                </AreaChart>
+                </LineChart>
               </ResponsiveContainer>
             </div>
           </div>
+
+          {/* ==========================
+              FUND OVERVIEW CHART
+          ========================== */}
         </>
       ) : (
         // ==========================

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import BotTable, { type Bot } from "./BotTable";
+import BotTable, { type Bot, type BotPositionHistoryEntry } from "./BotTable";
 import BotDetailsModal from "./BotDetailsModal";
 import { getApiBase } from "../../api/baseUrl";
 import { fetchSignalBotHistory, type SignalBotTrade } from "../../okxClient";
@@ -214,6 +214,38 @@ const computeStreakFromHistory = (
 
 const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
 
+type FetchJsonResult = { json: any; status: number; ok: boolean };
+
+const fetchJsonWithRetry = async (
+  url: string,
+  init?: RequestInit,
+  retries = 2,
+  backoffMs = 1200
+): Promise<FetchJsonResult> => {
+  let attempt = 0;
+  while (true) {
+    try {
+      const res = await fetch(url, init);
+      const json = await res.json().catch(() => ({}));
+      const isRateLimited =
+        res.status === 429 || json?.code === "50011" || json?.msg === "Too Many Requests";
+      if (isRateLimited && attempt < retries) {
+        attempt += 1;
+        await sleep(backoffMs * attempt);
+        continue;
+      }
+      return { json, status: res.status, ok: res.ok };
+    } catch (err) {
+      if (attempt < retries) {
+        attempt += 1;
+        await sleep(backoffMs * attempt);
+        continue;
+      }
+      throw err;
+    }
+  }
+};
+
 const normalizeTimestamp = (value: any) => {
   if (typeof value === "number" && Number.isFinite(value) && value > 0) {
     return value;
@@ -226,6 +258,39 @@ const normalizeTimestamp = (value: any) => {
   }
   return 0;
 };
+
+type NormalizedStreakRow = {
+  pnl: number;
+  cTime: number;
+  uTime: number;
+  closeTs: number;
+};
+
+const normalizeStreakRows = (rows: any[]): NormalizedStreakRow[] =>
+  rows.map((r: any) => ({
+    pnl: Number(r.pnl || 0),
+    cTime: normalizeTimestamp(r.cTime || r.time || r.closeTs),
+    uTime: normalizeTimestamp(r.uTime),
+    closeTs: normalizeTimestamp(
+      r.closeTs || r.uTime || r.closeTime || r.time || r.cTime
+    ),
+  }));
+
+const toPositionHistoryEntries = (
+  rows: NormalizedStreakRow[]
+): BotPositionHistoryEntry[] =>
+  rows
+    .map((row) => ({
+      pnl: row.pnl,
+      closeTs: row.closeTs || row.uTime || row.cTime,
+    }))
+    .filter(
+      (entry) =>
+        Number.isFinite(entry.pnl) &&
+        Number.isFinite(entry.closeTs) &&
+        entry.closeTs > 0
+    )
+    .sort((a, b) => a.closeTs - b.closeTs);
 
 type BotListProps = {
   onBotsUpdated?: (bots: Bot[]) => void;
@@ -259,13 +324,12 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
     for (const b of bots) {
       if (!b.algoId) continue;
       try {
-        const res = await fetch(
+        const { json } = await fetchJsonWithRetry(
           `${API_BASE}/api/signal-positions?algoId=${encodeURIComponent(
             b.algoId!
           )}${b.credIdx !== undefined ? `&credIdx=${b.credIdx}` : ""}`
         );
-        const json = await res.json().catch(() => ({}));
-        if (!res.ok && json?.code === "50011") {
+        if (json?.code === "50011" || json?.msg === "Too Many Requests") {
           console.warn(`⚠️ Rate limited open positions for ${b.algoId}, continue next`);
           continue;
         }
@@ -340,13 +404,12 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
     for (const b of bots) {
       if (!b.algoId) continue;
       try {
-        const res = await fetch(
+        const { json } = await fetchJsonWithRetry(
           `${API_BASE}/api/signal-orders-details?algoId=${encodeURIComponent(
             b.algoId!
           )}${b.credIdx !== undefined ? `&credIdx=${b.credIdx}` : ""}`
         );
-        const json = await res.json().catch(() => ({}));
-        if (!res.ok && json?.code === "50011") {
+        if (json?.code === "50011" || json?.msg === "Too Many Requests") {
           console.warn(`⚠️ Rate limited invested for ${b.algoId}, continue next`);
           continue;
         }
@@ -398,17 +461,16 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
       if (patchKey && seen.has(patchKey)) continue;
       if (patchKey) seen.add(patchKey);
       try {
-        const res = await fetch(
+        const { json, ok } = await fetchJsonWithRetry(
           `${API_BASE}/api/bot-trades?algoId=${encodeURIComponent(
             b.algoId!
           )}${b.credIdx !== undefined ? `&credIdx=${b.credIdx}` : ""}`
         );
-        const json = await res.json().catch(() => ({}));
-        if (!res.ok && json?.code === "50011") {
+        if (json?.code === "50011" || json?.msg === "Too Many Requests") {
           console.warn(`⚠️ Rate limited trades for ${b.algoId}, continue next`);
           continue;
         }
-        if (res.ok && typeof json.total === "number") {
+        if (ok && typeof json.total === "number") {
           patches[patchKey || b.algoId!] = {
             totalTrades: Number(json.total),
             totalTradesClosed: Number(json.closed ?? 0),
@@ -467,23 +529,23 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
         maxDdPerRange?: Record<string, number>;
         closedPnlAllTime?: number;
         profitFactor?: number;
+        positionHistory?: BotPositionHistoryEntry[];
       }
     > = {};
 
     for (const b of bots) {
       if (!b.algoId) continue;
       try {
-        const res = await fetch(
+        const { json, ok, status } = await fetchJsonWithRetry(
           `${API_BASE}/api/signal-positions-history?algoId=${encodeURIComponent(
             b.algoId!
           )}${b.credIdx !== undefined ? `&credIdx=${b.credIdx}` : ""}`
         );
-        const json = await res.json().catch(() => ({}));
-        if (!res.ok && json?.code === "50011") {
+        if (json?.code === "50011" || json?.msg === "Too Many Requests") {
           console.warn(`⚠️ Rate limited streaks for ${b.algoId}, continue next`);
           continue;
         }
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!ok) throw new Error(`HTTP ${status}`);
         let rows = Array.isArray(json.data) ? json.data : [];
         if ((!rows || rows.length === 0) && b.algoId) {
           try {
@@ -496,14 +558,8 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
             );
           }
         }
-        const normalizeRows = rows.map((r: any) => ({
-          pnl: Number(r.pnl || 0),
-          cTime: normalizeTimestamp(r.cTime || r.time || r.closeTs),
-          uTime: normalizeTimestamp(r.uTime),
-          closeTs: normalizeTimestamp(
-            r.closeTs || r.uTime || r.closeTime || r.time || r.cTime
-          ),
-        }));
+        const normalizeRows = normalizeStreakRows(rows);
+        const positionHistory = toPositionHistoryEntries(normalizeRows);
 
         const baseEquity =
           typeof b.assetsInBot === "number" && b.assetsInBot > 0
@@ -542,6 +598,7 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
             ...(typeof streak.profitFactor === "number"
               ? { profitFactor: streak.profitFactor }
               : {}),
+            positionHistory,
           };
         }
       } catch (err) {
@@ -550,6 +607,9 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
           try {
             const history = await fetchSignalBotHistory(b.algoId);
             const rows = convertTradesToRows(history.trades || []);
+            const normalizedFallbackRows = normalizeStreakRows(rows);
+            const fallbackPositionHistory =
+              toPositionHistoryEntries(normalizedFallbackRows);
             const baseEquity =
               typeof b.assetsInBot === "number" && b.assetsInBot > 0
                 ? b.assetsInBot
@@ -557,7 +617,7 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
                 ? b.investedAmount
                 : undefined;
             const fallbackStreak = computeStreakFromHistory(
-              rows,
+              normalizedFallbackRows,
               baseEquity,
               b.investedAmount ?? undefined
             );
@@ -587,6 +647,7 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
                 ...(typeof fallbackStreak.profitFactor === "number"
                   ? { profitFactor: fallbackStreak.profitFactor }
                   : {}),
+                positionHistory: fallbackPositionHistory,
               };
             }
           } catch (fallbackErr) {
@@ -707,6 +768,7 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
             winStreakAvgPerRange: {},
             winRatePerRange: {},
             closedPnlAllTime: 0,
+            positionHistory: [],
           };
 
           return bot;

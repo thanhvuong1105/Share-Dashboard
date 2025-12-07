@@ -1,5 +1,10 @@
 import React from "react";
 
+export type BotPositionHistoryEntry = {
+  pnl: number;
+  closeTs: number;
+};
+
 export type Bot = {
   id: string;
   algoId?: string;
@@ -37,6 +42,7 @@ export type Bot = {
   winRatePerRange?: Record<string, number>;
   maxDdPerRange?: Record<string, number>;
   closedPnlAllTime?: number;
+  positionHistory?: BotPositionHistoryEntry[];
 };
 
 interface BotTableProps {

@@ -53,6 +53,39 @@ export async function fetchFundOverview(): Promise<FundOverviewApiPayload> {
   };
 }
 
+export type TickerInfo = {
+  symbol: string;
+  lastPrice: number;
+  changePercent: number;
+};
+
+export async function fetchLatestTicker(
+  symbols: string[]
+): Promise<Record<string, TickerInfo>> {
+  if (!symbols.length) return {};
+  const params = new URLSearchParams();
+  params.set("symbols", symbols.join(","));
+  const res = await fetch(`${API_BASE}/api/tickers?${params.toString()}`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch tickers: ${res.status}`);
+  }
+  const json = await res.json().catch(() => ({}));
+  const data = Array.isArray(json.data) ? json.data : [];
+  const out: Record<string, TickerInfo> = {};
+  data.forEach((item: any) => {
+    const symbol = String(item.symbol || item.instId || item.inst || "").toUpperCase();
+    if (!symbol) return;
+    const lastPrice = Number(item.last || item.lastPrice || item.price || 0);
+    const changePercent = Number(item.changePercent || item.chg || item.percentage || 0);
+    out[symbol] = {
+      symbol,
+      lastPrice,
+      changePercent,
+    };
+  });
+  return out;
+}
+
 // ==== PnL History (OKX trade fills) ====
 
 export async function fetchPnlHistory(

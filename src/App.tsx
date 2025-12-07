@@ -8,6 +8,8 @@ import { type EquityHistoryPoint } from "./modules/fund/fundMockData";
 import {
   fetchFundOverview,
   type FundOverviewApiPayload,
+  fetchLatestTicker,
+  type TickerInfo,
 } from "./okxClient";
 
 type MainTab = "fund" | "bots";
@@ -38,6 +40,7 @@ const App: React.FC = () => {
   const [bots, setBots] = useState<Bot[]>([]);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [tickers, setTickers] = useState<Record<string, TickerInfo>>({});
 
   // Hydrate equity history từ localStorage để giữ data cũ trên chart
   useEffect(() => {
@@ -144,15 +147,67 @@ const App: React.FC = () => {
     };
   }, [tab]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const symbols = ["BTCUSDT", "ETHUSDT"];
+
+    const loadTickers = async () => {
+      try {
+        const data = await fetchLatestTicker(symbols);
+        if (!cancelled) {
+          setTickers(data);
+        }
+      } catch (err) {
+        console.warn("⚠️ Failed to fetch tickers:", err);
+      }
+    };
+
+    loadTickers();
+    const id = setInterval(loadTickers, 20_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-50">
       {/* HEADER */}
       <header className="border-b border-neutral-800 px-4 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-semibold">Bot Trading Dashboard</span>
-          <span className="px-2 py-0.5 text-[10px] rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-            Beta
-          </span>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold">Bot Trading Dashboard</span>
+            <span className="px-2 py-0.5 text-[10px] rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+              Beta
+            </span>
+          </div>
+          <div className="flex items-center gap-4 text-[11px]">
+            {["BTCUSDT", "ETHUSDT"].map((sym) => {
+              const info = tickers[sym];
+              const diffClass =
+                info && info.changePercent >= 0
+                  ? "text-emerald-400"
+                  : "text-red-400";
+              return (
+                <div key={sym} className="flex flex-col">
+                  <span className="text-neutral-500">{sym}</span>
+                  {info ? (
+                    <span className="text-neutral-200">
+                      {info.lastPrice.toLocaleString("en-US", {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}{" "}
+                      <span className={diffClass}>
+                        ({info.changePercent.toFixed(2)}%)
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="text-neutral-400">loading…</span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
         <div className="text-[11px] text-neutral-400 flex flex-col items-end">
           <span>VN Timezone (GMT+7)</span>
