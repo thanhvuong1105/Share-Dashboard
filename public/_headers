@@ -1,0 +1,23 @@
+/*
+  X-Content-Type-Options: nosniff
+
+/index.html
+  Content-Type: text/html; charset=utf-8
+
+/*
+  Cache-Control: public, max-age=0, must-revalidate
+
+/*.js
+  Content-Type: application/javascript; charset=utf-8
+
+/assets/*.js
+  Content-Type: application/javascript; charset=utf-8
+
+/*.css
+  Content-Type: text/css; charset=utf-8
+
+/assets/*.css
+  Content-Type: text/css; charset=utf-8
+
+/vite.svg
+  Content-Type: image/svg+xml
