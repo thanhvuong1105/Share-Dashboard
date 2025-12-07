@@ -53,6 +53,7 @@ type FundManagementProps = {
   equityHistory?: EquityHistoryPoint[];
   pnlHistory?: any;
   bots?: Bot[];
+  botHistories?: Record<string, number[]>;
 };
 
 // ===============================
@@ -81,6 +82,7 @@ const filterByRange = <T,>(data: T[], range: LocalRangePreset): T[] => {
   return data.slice(data.length - n);
 };
 
+
 // ===============================
 // MAIN COMPONENT
 // ===============================
@@ -88,6 +90,7 @@ export const FundManagement: React.FC<FundManagementProps> = ({
   fundMetrics,
   equityHistory,
   bots = [],
+  botHistories,
 }) => {
   const [activeTab, setActiveTab] =
     useState<"overview" | "pnl">("overview");
@@ -97,6 +100,22 @@ export const FundManagement: React.FC<FundManagementProps> = ({
   const [portfolioPnlAllTime, setPortfolioPnlAllTime] = useState<number | null>(
     null
   );
+  const [externalBots, setExternalBots] = useState<Bot[]>([]);
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const custom = event as CustomEvent<Bot[]>;
+      if (Array.isArray(custom.detail)) {
+        setExternalBots(custom.detail);
+      }
+    };
+    if (typeof window !== "undefined") {
+      window.addEventListener("bots-updated", handler as EventListener);
+      return () => {
+        window.removeEventListener("bots-updated", handler as EventListener);
+      };
+    }
+  }, []);
 
   // lấy PnL history (all bots, range ALL) để cộng vào Balance
   useEffect(() => {
@@ -157,8 +176,10 @@ export const FundManagement: React.FC<FundManagementProps> = ({
   const latestEquityPoint = equitySource[equitySource.length - 1];
 
   // Aggregate từ Bot List
+  const mergedBots = bots.length ? bots : externalBots;
+
   const aggregateFromBots = () => {
-    if (!bots.length) return null;
+    if (!mergedBots.length) return null;
     const getBotTrades = (bot: Bot) => {
       const total = Number(bot.totalTrades);
       if (Number.isFinite(total)) {
@@ -170,22 +191,23 @@ export const FundManagement: React.FC<FundManagementProps> = ({
       const fallback = closed + open;
       return fallback > 0 ? fallback : 0;
     };
-    const runningBots = bots.filter(
+    const runningBots = mergedBots.filter(
       (b) =>
         typeof b.status === "string" &&
         b.status.toLowerCase().trim() === "running"
     );
-    const activeBots = runningBots.length || bots.length;
-    // Open positions: bot có hasOpenPosition = true, fallback bot đang chạy
-    const botsWithOpen =
-      bots.filter((b) => b.hasOpenPosition).length || runningBots.length;
-    const openPositions = botsWithOpen;
-    const totalPnlFromBots = bots.reduce(
+    const activeBots = runningBots.length || mergedBots.length;
+
+    const openPositions = mergedBots.reduce((count, bot) => {
+      const entry = Number(bot.entryPrice);
+      return Number.isFinite(entry) && entry > 0 ? count + 1 : count;
+    }, 0);
+    const totalPnlFromBots = mergedBots.reduce(
       (s, b) => s + Number(b.totalPnl || 0),
       0
     );
     // Balance = tổng vốn đã deploy + PnL history (all bots, all time).
-    const totalInvestedFromBots = bots.reduce((sum, bot) => {
+    const totalInvestedFromBots = mergedBots.reduce((sum, bot) => {
       const invested = Number(bot.investedAmount ?? 0);
       return Number.isFinite(invested) ? sum + invested : sum;
     }, 0);
@@ -195,30 +217,82 @@ export const FundManagement: React.FC<FundManagementProps> = ({
       ? (portfolioPnlAllTime as number)
       : totalPnlFromBots;
     const balanceFromBots = totalInvestedFromBots + realizedPnlAllRange;
-    const realTimePnlFromBots = bots.reduce(
+    const realTimePnlFromBots = mergedBots.reduce(
       (sum, bot) => sum + Number(bot.closedPnlAllTime ?? 0),
       0
     );
     const totalEquityFromBots =
       totalInvestedFromBots + realTimePnlFromBots + totalPnlFromBots;
-    const tradesSum = bots.reduce((s, b) => s + getBotTrades(b), 0);
-    const winTrades = bots.reduce((s, b) => {
+    const tradesSum = mergedBots.reduce((s, b) => s + getBotTrades(b), 0);
+    const winTrades = mergedBots.reduce((s, b) => {
       const trades = getBotTrades(b);
       const wr = Number((b as any).avgWr || 0);
       return s + trades * wr;
     }, 0);
-    const winrate =
-      tradesSum > 0 ? Math.max(0, Math.min(1, winTrades / tradesSum)) : 0;
+    const profitFactors = mergedBots
+      .map((bot) => Number(bot.profitFactor))
+      .filter((val) => Number.isFinite(val) && val > 0);
+    const profitFactor =
+      profitFactors.length > 0
+        ? profitFactors.reduce((sum, val) => sum + val, 0) /
+          profitFactors.length
+        : undefined;
+
+    let totalClosedTrades = tradesSum;
+    let totalWins = winTrades;
+
+    if (botHistories && Object.keys(botHistories).length) {
+      totalClosedTrades = 0;
+      totalWins = 0;
+      mergedBots.forEach((bot) => {
+        const pnlList = bot.algoId ? botHistories[bot.algoId] : undefined;
+        if (!pnlList || !Array.isArray(pnlList)) return;
+        pnlList.forEach((pnl) => {
+          const pnlValue = Number(pnl);
+          if (!Number.isFinite(pnlValue)) return;
+          if (pnlValue > 0) {
+            totalWins += 1;
+            totalClosedTrades += 1;
+          } else if (pnlValue < 0) {
+            totalClosedTrades += 1;
+          }
+        });
+      });
+    }
+
+    const winrateNormalized =
+      totalClosedTrades > 0
+        ? Math.max(0, Math.min(1, totalWins / totalClosedTrades))
+        : 0;
+
+    const validDrawdowns = mergedBots
+      .map((bot) => {
+        const direct = Number(bot.maxDd);
+        if (Number.isFinite(direct)) {
+          return direct;
+        }
+        const fromRange = bot.maxDdPerRange?.ALL;
+        const rangeValue = Number(fromRange);
+        return Number.isFinite(rangeValue) ? rangeValue : undefined;
+      })
+      .filter((val): val is number => Number.isFinite(val));
+    const maxDrawdownFromBots =
+      validDrawdowns.length > 0
+        ? validDrawdowns.reduce((sum, val) => sum + val, 0) /
+          validDrawdowns.length
+        : undefined;
 
     return {
       activeBots,
-      openPositions,
       totalPnlFromBots,
       totalEquityFromBots,
       balanceFromBots,
       realTimePnlFromBots,
       initialFromBots: totalInvestedFromBots,
-      winrate,
+      winrate: winrateNormalized,
+      profitFactor,
+      maxDrawdownFromBots,
+      openPositions,
     };
   };
 
@@ -247,9 +321,23 @@ export const FundManagement: React.FC<FundManagementProps> = ({
       botAgg?.realTimePnlFromBots ??
       baseMetrics.realTimePnl ??
       0,
-    openPositions: botAgg?.openPositions ?? baseMetrics.openPositions ?? 0,
+    openPositions:
+      botAgg?.openPositions !== undefined
+        ? botAgg.openPositions
+        : baseMetrics.openPositions ?? 0,
     activeBots: botAgg?.activeBots ?? baseMetrics.activeBots ?? 0,
-    winrate: botAgg?.winrate ?? baseMetrics.winrate ?? 0,
+    winrate:
+      botAgg?.winrate !== undefined
+        ? botAgg.winrate
+        : baseMetrics.winrate ?? 0,
+    profitFactor:
+      botAgg?.profitFactor ??
+      baseMetrics.profitFactor ??
+      undefined,
+    maxDrawdown:
+      botAgg?.maxDrawdownFromBots !== undefined
+        ? botAgg.maxDrawdownFromBots
+        : baseMetrics.maxDrawdown ?? 0,
   };
 
   const currency = baseMetrics.currency ?? "USDT";
@@ -333,7 +421,9 @@ export const FundManagement: React.FC<FundManagementProps> = ({
             <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4">
               <div className="text-xs text-neutral-500">Open Positions</div>
               <div className="mt-1 text-base font-semibold text-neutral-50">
-                {baseMetrics.openPositions}
+                {Number.isFinite(metricsRange.openPositions as number)
+                  ? Number(metricsRange.openPositions).toLocaleString("en-US")
+                  : "-"}
               </div>
             </div>
 
@@ -341,7 +431,9 @@ export const FundManagement: React.FC<FundManagementProps> = ({
             <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4">
               <div className="text-xs text-neutral-500">Active Bots</div>
               <div className="mt-1 text-base font-semibold text-neutral-50">
-                {baseMetrics.activeBots}
+                {Number.isFinite(metricsRange.activeBots as number)
+                  ? Number(metricsRange.activeBots).toLocaleString("en-US")
+                  : "-"}
               </div>
             </div>
 
@@ -385,7 +477,7 @@ export const FundManagement: React.FC<FundManagementProps> = ({
             <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4">
               <div className="text-xs text-neutral-500">Winrate</div>
               <div className="mt-1 text-base font-semibold text-emerald-400">
-                {formatPercent(baseMetrics.winrate)}
+                {formatPercent(metricsRange.winrate)}
               </div>
             </div>
 
@@ -393,7 +485,7 @@ export const FundManagement: React.FC<FundManagementProps> = ({
             <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4">
               <div className="text-xs text-neutral-500">Max Drawdown</div>
               <div className="mt-1 text-base font-semibold text-red-400">
-                {formatPercent(baseMetrics.maxDrawdown)}
+                {formatPercent(metricsRange.maxDrawdown)}
               </div>
             </div>
 
@@ -401,7 +493,9 @@ export const FundManagement: React.FC<FundManagementProps> = ({
             <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4">
               <div className="text-xs text-neutral-500">Profit Factor</div>
               <div className="mt-1 text-base font-semibold text-neutral-50">
-                {baseMetrics.profitFactor?.toFixed(2) ?? "-"}
+                {metricsRange.profitFactor !== undefined
+                  ? metricsRange.profitFactor.toFixed(2)
+                  : "-"}
               </div>
             </div>
           </div>

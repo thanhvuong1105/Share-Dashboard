@@ -221,6 +221,12 @@ const BotTable: React.FC<BotTableProps> = ({
                 : bot.hasOpenPosition
                 ? bot.side
                 : "None";
+              const profitFactorValue = Number(bot.profitFactor);
+              const profitFactorLabel = Number.isFinite(profitFactorValue)
+                ? profitFactorValue.toFixed(2)
+                : profitFactorValue === Number.POSITIVE_INFINITY
+                ? "∞"
+                : "—";
               const positionPnlClass =
                 bot.positionPnl === 0
                   ? "text-neutral-100"
@@ -393,7 +399,7 @@ const BotTable: React.FC<BotTableProps> = ({
 
                   {/* Profit Factor */}
                   <td className="px-3 py-2 text-center">
-                    {bot.profitFactor.toFixed(2)}
+                    {profitFactorLabel}
                   </td>
                 </tr>
               );

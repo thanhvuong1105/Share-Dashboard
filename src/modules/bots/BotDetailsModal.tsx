@@ -1,6 +1,12 @@
 // src/modules/bots/BotDetailsModal.tsx
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { fetchSignalBotHistory, type SignalBotTrade } from "../../okxClient";
 import { getApiBase } from "../../api/baseUrl";
 
@@ -9,10 +15,22 @@ const API_BASE = getApiBase();
 interface BotDetailsModalProps {
   bot: any & { credIdx?: number }; // tạm dùng any, sau này refactor type sau
   onClose: () => void;
+  initialPosition?: { x: number; y: number };
+  initialSize?: { width: number; height: number };
 }
 
 type LocalRangePreset = "7D" | "30D" | "90D" | "180D" | "365D" | "ALL";
 type WrRangePreset = "30D" | "90D" | "180D" | "365D" | "2Y" | "3Y" | "ALL";
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const LOCAL_RANGE_TO_MS: Record<LocalRangePreset, number | null> = {
+  "7D": 7 * DAY_MS,
+  "30D": 30 * DAY_MS,
+  "90D": 90 * DAY_MS,
+  "180D": 180 * DAY_MS,
+  "365D": 365 * DAY_MS,
+  ALL: null,
+};
 
 const localRangeOptions: LocalRangePreset[] = [
   "7D",
@@ -38,7 +56,93 @@ type DetailItem = {
   value: React.ReactNode;
 };
 
-const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
+type HistoryLikeRow = {
+  pnl?: number;
+  cTime?: number;
+  uTime?: number;
+  closeTs?: number;
+};
+
+const normalizeHistoryEntries = (rows: HistoryLikeRow[]) =>
+  rows
+    .map((row) => ({
+      pnl: Number(row.pnl || 0),
+      ts: Number(row.closeTs || row.uTime || row.cTime || 0),
+    }))
+    .filter(
+      (item) =>
+        Number.isFinite(item.pnl) &&
+        Number.isFinite(item.ts) &&
+        item.ts > 0
+    )
+    .sort((a, b) => a.ts - b.ts);
+
+const calcDrawdownForSeries = (
+  series: { ts: number; equity: number }[],
+  maxAgeMs: number | null,
+  now: number
+) => {
+  const filtered =
+    maxAgeMs === null ? series : series.filter((pt) => now - pt.ts <= maxAgeMs);
+  if (!filtered.length) return 0;
+  let peak = filtered[0].equity;
+  let maxDd = 0;
+  for (const pt of filtered) {
+    if (pt.equity > peak) {
+      peak = pt.equity;
+    }
+    if (peak > 0) {
+      const dd = (pt.equity - peak) / peak;
+      if (dd < maxDd) maxDd = dd;
+    }
+  }
+  return maxDd;
+};
+
+const computeDrawdownFromHistory = (
+  rows: HistoryLikeRow[],
+  investedAmount?: number | null
+) => {
+  const entries = normalizeHistoryEntries(rows);
+  if (!entries.length) return null;
+  const baseEquity =
+    typeof investedAmount === "number" && investedAmount > 0
+      ? investedAmount
+      : Math.max(Math.abs(entries[0].pnl), 1);
+  let cumulative = 0;
+  let peakEquity = baseEquity;
+  let maxDrawdown = 0;
+  const equitySeries: { ts: number; equity: number }[] = [];
+  for (const entry of entries) {
+    cumulative += entry.pnl;
+    const equity = baseEquity + cumulative;
+    equitySeries.push({ ts: entry.ts, equity });
+    if (equity > peakEquity) {
+      peakEquity = equity;
+    }
+    if (peakEquity > 0) {
+      const dd = (equity - peakEquity) / peakEquity;
+      if (dd < maxDrawdown) maxDrawdown = dd;
+    }
+  }
+  const now = Date.now();
+  const perRange = {} as Record<LocalRangePreset, number>;
+  localRangeOptions.forEach((preset) => {
+    const limit = LOCAL_RANGE_TO_MS[preset];
+    perRange[preset] = calcDrawdownForSeries(equitySeries, limit, now);
+  });
+  if (perRange.ALL === undefined) {
+    perRange.ALL = maxDrawdown;
+  }
+  return { allTime: maxDrawdown, perRange };
+};
+
+const BotDetailsModal: React.FC<BotDetailsModalProps> = ({
+  bot,
+  onClose,
+  initialPosition,
+  initialSize,
+}) => {
   // Range riêng cho popup
   const [localRange, setLocalRange] = useState<LocalRangePreset>("30D");
 
@@ -47,6 +151,33 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
   const [wrRangeWin2, setWrRangeWin2] = useState<WrRangePreset>("30D");
   const [wrRangeWin3, setWrRangeWin3] = useState<WrRangePreset>("30D");
   const [wrRangeWin4, setWrRangeWin4] = useState<WrRangePreset>("30D");
+  const [dimensions] = useState(() => ({
+    width: initialSize?.width ?? 700,
+    height: initialSize?.height ?? 600,
+  }));
+  const [position, setPosition] = useState(() => ({
+    x: initialPosition?.x ?? 40,
+    y: initialPosition?.y ?? 80,
+  }));
+  const dragStart = useRef({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+
+
+  const clampPosition = useCallback(
+    (nextX: number, nextY: number, nextDims = dimensions) => {
+      const viewportWidth =
+        typeof window !== "undefined" ? window.innerWidth : 1400;
+      const viewportHeight =
+        typeof window !== "undefined" ? window.innerHeight : 900;
+      const maxX = Math.max(20, viewportWidth - nextDims.width - 20);
+      const maxY = Math.max(20, viewportHeight - nextDims.height - 20);
+      return {
+        x: Math.min(Math.max(20, nextX), maxX),
+        y: Math.min(Math.max(20, nextY), maxY),
+      };
+    },
+    [dimensions]
+  );
 
   // ===== Bảo vệ dữ liệu bot =====
   const totalPnl = typeof bot?.totalPnl === "number" ? bot.totalPnl : 0;
@@ -189,6 +320,11 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
       : positionInfo && typeof positionInfo.pnl === "number"
       ? Number(positionInfo.pnl)
       : undefined;
+  const profitFactorLabel = Number.isFinite(profitFactor)
+    ? profitFactor.toFixed(2)
+    : profitFactor === Number.POSITIVE_INFINITY
+    ? "∞"
+    : "—";
   const loseStreakAvgMap =
     bot?.loseStreakAvgPerRange &&
     typeof bot.loseStreakAvgPerRange === "object"
@@ -297,6 +433,30 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
     const algoId = bot?.algoId || bot?.id;
     if (!algoId) return;
     let cancelled = false;
+    const mapFallbackTrades = (trades: SignalBotTrade[]) => {
+      const instId =
+        bot?.instId ||
+        (Array.isArray(bot?.instIds) ? bot.instIds[0] : undefined) ||
+        "";
+      return trades.map((t) => {
+        const tsRaw =
+          typeof t.ts === "number" && t.ts > 0
+            ? Number(t.ts)
+            : t.time
+            ? Date.parse(t.time)
+            : Date.now();
+        const safeTs = Number.isFinite(tsRaw) && tsRaw > 0 ? tsRaw : Date.now();
+        return {
+          instId: t.instId || instId,
+          openAvgPx: Number(t.price || 0),
+          closeAvgPx: Number(t.price || 0),
+          pnl: Number(t.pnl || 0),
+          cTime: safeTs,
+          uTime: safeTs,
+          closeTs: safeTs,
+        };
+      });
+    };
     const fetchPosHistory = async () => {
       try {
         const res = await fetch(
@@ -304,17 +464,27 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
             algoId
           )}${bot?.credIdx !== undefined ? `&credIdx=${bot.credIdx}` : ""}`
         );
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
         if (cancelled) return;
-        const rows = Array.isArray(json.data) ? json.data : [];
+        let rows = Array.isArray(json.data) ? json.data : [];
+        if ((!rows || rows.length === 0) && algoId) {
+          try {
+            const history = await fetchSignalBotHistory(algoId);
+            rows = mapFallbackTrades(history.trades || []);
+          } catch (fallbackErr) {
+            console.warn(
+              `⚠️ fallback signal history failed in modal for ${algoId}:`,
+              fallbackErr
+            );
+          }
+        }
         setPosHistory(
           rows.map((r: any) => ({
             instId: String(r.instId || ""),
-            openAvgPx: Number(r.openAvgPx || 0),
-            closeAvgPx: Number(r.closeAvgPx || 0),
+            openAvgPx: Number(r.openAvgPx || r.price || 0),
+            closeAvgPx: Number(r.closeAvgPx || r.price || 0),
             pnl: Number(r.pnl || 0),
-            cTime: Number(r.cTime || r.time || 0),
+            cTime: Number(r.cTime || r.time || r.closeTs || 0),
             uTime: Number(r.uTime || 0),
             closeTs: Number(r.uTime || r.closeTime || r.time || 0),
           }))
@@ -407,14 +577,34 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
     bot?.maxDdPerRange && typeof bot.maxDdPerRange === "object"
       ? (bot.maxDdPerRange as Record<string, number>)
       : undefined;
+
+  const ddFromHistory = useMemo(
+    () => computeDrawdownFromHistory(posHistory, investedAmount ?? undefined),
+    [posHistory, investedAmount]
+  );
+
+  const pickDdValue = (preset: LocalRangePreset): number | undefined => {
+    if (
+      ddFromHistory?.perRange &&
+      typeof ddFromHistory.perRange[preset] === "number"
+    ) {
+      return ddFromHistory.perRange[preset];
+    }
+    if (ddMap && typeof ddMap[preset] === "number") {
+      return ddMap[preset];
+    }
+    return undefined;
+  };
+
   const allTimeDd =
-    (ddMap && typeof ddMap.ALL === "number" ? ddMap.ALL : undefined) ??
+    pickDdValue("ALL") ??
+    (typeof ddFromHistory?.allTime === "number"
+      ? ddFromHistory.allTime
+      : undefined) ??
     baseMaxDd;
   const avgDdValue = allTimeDd ?? baseMaxDd;
   let rangeDdValue =
-    ddMap && typeof ddMap[localRange] === "number"
-      ? ddMap[localRange]
-      : undefined;
+    pickDdValue(localRange) ?? (localRange === "ALL" ? allTimeDd : undefined);
   if (
     localRange.toUpperCase() === "ALL" &&
     typeof allTimeDd === "number"
@@ -565,16 +755,56 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
     { label: "Leverage", value: leverageLabel },
     {
       label: "Profit Factor",
-      value: Number.isFinite(profitFactor)
-        ? profitFactor.toFixed(2)
-        : "—",
+      value: profitFactorLabel,
     },
   ];
 
+  const startDrag = (event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dragStart.current = {
+      x: event.clientX - position.x,
+      y: event.clientY - position.y,
+    };
+    setIsDragging(true);
+  };
+
+  useEffect(() => {
+    if (!isDragging) return;
+    const handleMove = (moveEvent: MouseEvent) => {
+      const nextX = moveEvent.clientX - dragStart.current.x;
+      const nextY = moveEvent.clientY - dragStart.current.y;
+      setPosition(clampPosition(nextX, nextY));
+    };
+    const stopDrag = () => setIsDragging(false);
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", stopDrag);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", stopDrag);
+    };
+  }, [isDragging, clampPosition]);
+
+  useEffect(() => {
+    if (isDragging) return;
+    setPosition((prev) => clampPosition(prev.x, prev.y));
+  }, [dimensions.width, dimensions.height, clampPosition, isDragging]);
+
   return (
-    <div className="pointer-events-auto w-[700px] max-h-[85vh] bg-neutral-950 border border-neutral-800 rounded-2xl shadow-2xl shadow-black/60 flex flex-col overflow-hidden text-[13px]">
+    <div
+      className="pointer-events-auto absolute bg-neutral-950 border border-neutral-800 rounded-2xl shadow-2xl shadow-black/60 flex flex-col overflow-hidden text-[13px]"
+      style={{
+        width: dimensions.width,
+        height: dimensions.height,
+        top: position.y,
+        left: position.x,
+      }}
+    >
       {/* HEADER */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-neutral-800 bg-neutral-900/70">
+      <div
+        className="flex items-center justify-between px-3 py-2 border-b border-neutral-800 bg-neutral-900/70 cursor-move select-none"
+        onMouseDown={startDrag}
+      >
         <div className="flex flex-col">
           <span className="text-sm font-semibold text-neutral-50">
             {bot?.name ?? "Bot name"}
@@ -614,7 +844,8 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
       </div>
 
       {/* BODY */}
-      <div className="px-3 py-3 space-y-3 overflow-auto text-[13px] text-neutral-200">
+      <div className="flex-1 relative min-h-0">
+        <div className="px-3 py-3 space-y-3 overflow-auto text-[13px] text-neutral-200 h-full">
         <div className="border border-neutral-800 rounded-lg p-3">
           <div className="text-[11px] text-neutral-400 mb-2 uppercase tracking-wide">
             Overview
@@ -639,7 +870,6 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
             ))}
           </div>
         </div>
-
         <div className="border border-neutral-800 rounded-lg p-2">
           <div className="text-[11px] text-neutral-400 mb-1 uppercase tracking-wide">
             Trading Stats
@@ -891,6 +1121,7 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({ bot, onClose }) => {
               <div className="text-red-400">—</div>
             </div>
           </div>
+        </div>
         </div>
       </div>
     </div>

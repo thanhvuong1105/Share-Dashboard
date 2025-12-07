@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import BotTable, { type Bot } from "./BotTable";
 import BotDetailsModal from "./BotDetailsModal";
 import { getApiBase } from "../../api/baseUrl";
+import { fetchSignalBotHistory, type SignalBotTrade } from "../../okxClient";
 
 type CoinTab = "BTC" | "ETH";
 type RangePreset = "7D" | "30D" | "90D" | "180D" | "365D" | "ALL";
@@ -155,6 +156,8 @@ const computeStreakFromHistory = (
   let curLose = 0;
   let maxWin = 0;
   let maxLose = 0;
+  let grossProfit = 0;
+  let grossLoss = 0;
   const baseEquity =
     typeof initialEquity === "number" && initialEquity > 0
       ? initialEquity
@@ -163,10 +166,12 @@ const computeStreakFromHistory = (
       : 1;
   for (const entry of entries) {
     if (entry.pnl > 0) {
+      grossProfit += entry.pnl;
       curWin += 1;
       maxWin = Math.max(maxWin, curWin);
       curLose = 0;
     } else if (entry.pnl < 0) {
+      grossLoss += Math.abs(entry.pnl);
       curLose += 1;
       maxLose = Math.max(maxLose, curLose);
       curWin = 0;
@@ -185,6 +190,13 @@ const computeStreakFromHistory = (
   } = calcRangeStats(entries, baseEquity);
   const totalClosedPnl = entries.reduce((sum, entry) => sum + entry.pnl, 0);
 
+  const profitFactor =
+    grossLoss > 0
+      ? grossProfit / grossLoss
+      : grossProfit > 0
+      ? Number.POSITIVE_INFINITY
+      : 0;
+
   return {
     winCurrent: curWin,
     winMax: Math.max(maxWin, curWin),
@@ -196,10 +208,24 @@ const computeStreakFromHistory = (
     maxDrawdown,
     maxDrawdownPerRange: drawdownPerRange,
     totalClosedPnl,
+    profitFactor,
   };
 };
 
 const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+
+const normalizeTimestamp = (value: any) => {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return 0;
+};
 
 type BotListProps = {
   onBotsUpdated?: (bots: Bot[]) => void;
@@ -407,6 +433,23 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
   };
 
   // lấy streak từ positions-history (closed) cho từng bot
+  const convertTradesToRows = (trades: SignalBotTrade[]) =>
+    trades.map((t) => {
+      const tsRaw =
+        typeof t.ts === "number" && t.ts > 0
+          ? Number(t.ts)
+          : t.time
+          ? Date.parse(t.time)
+          : NaN;
+      const safeTs = Number.isFinite(tsRaw) && tsRaw > 0 ? tsRaw : Date.now();
+      return {
+        pnl: Number(t.pnl || 0),
+        closeTs: safeTs,
+        cTime: safeTs,
+        uTime: safeTs,
+      };
+    });
+
   const loadStreaks = async (bots: Bot[]) => {
     const patches: Record<
       string,
@@ -423,6 +466,7 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
         maxDd?: number;
         maxDdPerRange?: Record<string, number>;
         closedPnlAllTime?: number;
+        profitFactor?: number;
       }
     > = {};
 
@@ -440,7 +484,27 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
           continue;
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const rows = Array.isArray(json.data) ? json.data : [];
+        let rows = Array.isArray(json.data) ? json.data : [];
+        if ((!rows || rows.length === 0) && b.algoId) {
+          try {
+            const history = await fetchSignalBotHistory(b.algoId);
+            rows = convertTradesToRows(history.trades || []);
+          } catch (historyErr) {
+            console.warn(
+              `⚠️ fallback signal history failed for ${b.algoId}:`,
+              historyErr
+            );
+          }
+        }
+        const normalizeRows = rows.map((r: any) => ({
+          pnl: Number(r.pnl || 0),
+          cTime: normalizeTimestamp(r.cTime || r.time || r.closeTs),
+          uTime: normalizeTimestamp(r.uTime),
+          closeTs: normalizeTimestamp(
+            r.closeTs || r.uTime || r.closeTime || r.time || r.cTime
+          ),
+        }));
+
         const baseEquity =
           typeof b.assetsInBot === "number" && b.assetsInBot > 0
             ? b.assetsInBot
@@ -448,7 +512,7 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
             ? b.investedAmount
             : undefined;
         const streak = computeStreakFromHistory(
-          rows,
+          normalizeRows,
           baseEquity,
           b.investedAmount ?? undefined
         );
@@ -475,10 +539,63 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
                 : undefined,
             maxDdPerRange: streak.maxDrawdownPerRange,
             closedPnlAllTime: streak.totalClosedPnl ?? 0,
+            ...(typeof streak.profitFactor === "number"
+              ? { profitFactor: streak.profitFactor }
+              : {}),
           };
         }
       } catch (err) {
         console.warn(`⚠️ loadStreaks failed for ${b.algoId}:`, err);
+        if (b.algoId) {
+          try {
+            const history = await fetchSignalBotHistory(b.algoId);
+            const rows = convertTradesToRows(history.trades || []);
+            const baseEquity =
+              typeof b.assetsInBot === "number" && b.assetsInBot > 0
+                ? b.assetsInBot
+                : typeof b.investedAmount === "number" && b.investedAmount > 0
+                ? b.investedAmount
+                : undefined;
+            const fallbackStreak = computeStreakFromHistory(
+              rows,
+              baseEquity,
+              b.investedAmount ?? undefined
+            );
+            if (fallbackStreak) {
+              patches[b.algoId!] = {
+                winStreakCurrent: fallbackStreak.winCurrent,
+                winStreakMax: fallbackStreak.winMax,
+                loseStreakCurrent: fallbackStreak.loseCurrent,
+                loseStreakMax: fallbackStreak.loseMax,
+                loseStreakAvgAll:
+                  typeof fallbackStreak.loseAvgPerRange?.ALL === "number"
+                    ? fallbackStreak.loseAvgPerRange.ALL
+                    : undefined,
+                loseStreakAvgPerRange: fallbackStreak.loseAvgPerRange,
+                winStreakAvgAll:
+                  typeof fallbackStreak.winAvgPerRange?.ALL === "number"
+                    ? fallbackStreak.winAvgPerRange.ALL
+                    : undefined,
+                winStreakAvgPerRange: fallbackStreak.winAvgPerRange,
+                winRatePerRange: fallbackStreak.winRatePerRange,
+                maxDd:
+                  typeof fallbackStreak.maxDrawdown === "number"
+                    ? fallbackStreak.maxDrawdown
+                    : undefined,
+                maxDdPerRange: fallbackStreak.maxDrawdownPerRange,
+                closedPnlAllTime: fallbackStreak.totalClosedPnl ?? 0,
+                ...(typeof fallbackStreak.profitFactor === "number"
+                  ? { profitFactor: fallbackStreak.profitFactor }
+                  : {}),
+              };
+            }
+          } catch (fallbackErr) {
+            console.warn(
+              `⚠️ fallback signal history (catch) failed for ${b.algoId}:`,
+              fallbackErr
+            );
+          }
+        }
       }
       await sleep(400);
     }
@@ -644,12 +761,27 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
     );
   };
 
+  const defaultPopupPosition = (index: number) => {
+    const viewportWidth =
+      typeof window !== "undefined" ? window.innerWidth : 1280;
+    const baseX = Math.max(20, viewportWidth - 760);
+    return {
+      x: baseX - index * 24,
+      y: 80 + index * 32,
+    };
+  };
+
   const handleCloseBot = (id: string) => {
     setOpenBots((prev) => prev.filter((b) => b.id !== id));
   };
 
   useEffect(() => {
     onBotsUpdated?.(allBots);
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("bots-updated", { detail: allBots })
+      );
+    }
   }, [allBots, onBotsUpdated]);
 
   return (
@@ -718,13 +850,14 @@ const BotList: React.FC<BotListProps> = ({ onBotsUpdated }) => {
         />
       </div>
 
-      {/* Popups – có thể mở nhiều bot, cố định góc phải */}
-      <div className="pointer-events-none fixed inset-y-20 right-4 z-40 flex flex-col items-end gap-3">
-        {openBots.map((bot) => (
+      {/* Popups – có thể mở nhiều bot */}
+      <div className="pointer-events-none fixed inset-0 z-40">
+        {openBots.map((bot, idx) => (
           <BotDetailsModal
             key={bot.id}
             bot={bot}
             onClose={() => handleCloseBot(bot.id)}
+            initialPosition={defaultPopupPosition(idx)}
           />
         ))}
       </div>
