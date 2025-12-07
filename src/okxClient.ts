@@ -57,6 +57,19 @@ export type TickerInfo = {
   symbol: string;
   lastPrice: number;
   changePercent: number;
+  changeAbsolute?: number;
+  high24h?: number;
+  low24h?: number;
+};
+
+export type SingleTicker = {
+  symbol: string;
+  lastPrice: number;
+  changePercent: number;
+  changeAbsolute?: number;
+  high24h?: number;
+  low24h?: number;
+  ts?: number;
 };
 
 export async function fetchLatestTicker(
@@ -77,13 +90,49 @@ export async function fetchLatestTicker(
     if (!symbol) return;
     const lastPrice = Number(item.last || item.lastPrice || item.price || 0);
     const changePercent = Number(item.changePercent || item.chg || item.percentage || 0);
+    const changeAbsolute = Number(item.changeAbsolute || item.changeAbs || item.change || 0);
+    const high24h = Number(item.high24h || 0);
+    const low24h = Number(item.low24h || 0);
     out[symbol] = {
       symbol,
       lastPrice,
       changePercent,
+      changeAbsolute,
+      high24h,
+      low24h,
     };
   });
   return out;
+}
+
+export async function fetchMarketTicker(instId: string): Promise<SingleTicker | null> {
+  if (!instId) return null;
+  const res = await fetch(
+    `${API_BASE}/api/market-ticker?instId=${encodeURIComponent(instId)}`
+  );
+  if (!res.ok) {
+    console.warn("fetchMarketTicker failed", res.status);
+    return null;
+  }
+  const json = await res.json().catch(() => null);
+  if (!json) return null;
+
+  const last = Number(json.last || 0);
+  const changePercent = Number(json.changePercent || 0);
+  const changeAbsolute = Number(json.changeAbsolute || 0);
+  const high24h = Number(json.high24h || 0);
+  const low24h = Number(json.low24h || 0);
+  const symbol = String(json.symbol || json.instId || instId || "").toUpperCase();
+
+  return {
+    symbol,
+    lastPrice: last,
+    changePercent,
+    changeAbsolute,
+    high24h,
+    low24h,
+    ts: typeof json.ts === "number" ? json.ts : undefined,
+  };
 }
 
 // ==== PnL History (OKX trade fills) ====

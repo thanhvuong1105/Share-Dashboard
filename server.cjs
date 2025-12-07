@@ -1324,11 +1324,6 @@ app.get("/api/market-ticker", async (req, res) => {
     const resp = await fetchOkx(path, { method: "GET" });
     const json = await resp.json();
 
-    console.log(
-      `🔥 MARKET TICKER RAW (instId=${instId}, host ${resp.okxHost || OKX_BASE_URL}):`,
-      JSON.stringify(json, null, 2)
-    );
-
     if (json.code !== "0" || !Array.isArray(json.data) || !json.data[0]) {
       return res
         .status(500)
@@ -1336,18 +1331,94 @@ app.get("/api/market-ticker", async (req, res) => {
     }
 
     const t = json.data[0];
+    const last = Number(t.last || 0);
+    const open24h = Number(t.open24h || 0);
+    const changeAbsolute = open24h ? last - open24h : 0;
+    const changePercent = open24h ? (changeAbsolute / open24h) * 100 : 0;
+
     return res.json({
       instId,
-      last: Number(t.last || 0),
+      symbol: (t.instId || instId || "").toUpperCase(),
+      last,
       ask: Number(t.askPx || 0),
       bid: Number(t.bidPx || 0),
       high24h: Number(t.high24h || 0),
       low24h: Number(t.low24h || 0),
+      open24h,
+      changeAbsolute,
+      changePercent,
       ts: Number(t.ts || Date.now()),
       raw: t,
     });
   } catch (err) {
     console.error("❌ ERROR /api/market-ticker:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ===================================================================
+//  MULTI TICKERS (public) – dùng cho header BTCUSDT.P / ETHUSDT.P
+//  GET /api/tickers?symbols=BTCUSDT.P,ETHUSDT.P
+// ===================================================================
+app.get("/api/tickers", async (req, res) => {
+  try {
+    const symbolsRaw = (req.query.symbols || "").toString();
+    if (!symbolsRaw) {
+      return res.json({ data: [] });
+    }
+
+    const symbols = symbolsRaw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const toInstId = (sym) => {
+      const baseSym = sym.toUpperCase().replace(/\.P$/, "");
+      // assume USDT quote for now
+      if (baseSym.endsWith("USDT")) {
+        const base = baseSym.replace(/USDT$/, "");
+        return `${base}-USDT-SWAP`;
+      }
+      return `${baseSym}-SWAP`;
+    };
+
+    const results = await Promise.all(
+      symbols.map(async (sym) => {
+        const instId = toInstId(sym);
+        const query = new URLSearchParams({ instId });
+        const path = `/api/v5/market/ticker?${query.toString()}`;
+        const resp = await fetchOkx(path, { method: "GET" });
+        const json = await resp.json();
+
+        if (json.code !== "0" || !Array.isArray(json.data) || !json.data[0]) {
+          return null;
+        }
+
+        const t = json.data[0];
+        const last = Number(t.last || 0);
+        const open24h = Number(t.open24h || 0);
+        const changeAbs = open24h ? last - open24h : 0;
+        const changePercent =
+          open24h && open24h !== 0 ? (changeAbs / open24h) * 100 : 0;
+
+        return {
+          symbol: sym.toUpperCase(),
+          instId,
+          last,
+          high24h: Number(t.high24h || 0),
+          low24h: Number(t.low24h || 0),
+          open24h,
+          changeAbsolute: changeAbs,
+          changePercent,
+          ts: Number(t.ts || Date.now()),
+        };
+      })
+    );
+
+    const data = results.filter(Boolean);
+    return res.json({ data });
+  } catch (err) {
+    console.error("❌ ERROR /api/tickers:", err);
     res.status(500).json({ error: "Server error" });
   }
 });

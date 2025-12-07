@@ -32,8 +32,6 @@ export type BotAllocation = {
   pnl: number;
 };
 
-type LocalRangePreset = "7D" | "30D" | "90D" | "ALL";
-
 type FundManagementProps = {
   fundMetrics?: {
     totalEquity?: number;
@@ -121,15 +119,6 @@ const calcMaxDrawdownFromHistory = (
   return maxDrawdown;
 };
 
-// Filter Equity theo Range
-const filterByRange = <T,>(data: T[], range: LocalRangePreset): T[] => {
-  if (range === "ALL") return data;
-  const n = range === "7D" ? 7 : range === "30D" ? 30 : 90;
-  if (data.length <= n) return data;
-  return data.slice(data.length - n);
-};
-
-
 // ===============================
 // MAIN COMPONENT
 // ===============================
@@ -142,8 +131,6 @@ export const FundManagement: React.FC<FundManagementProps> = ({
   const [activeTab, setActiveTab] =
     useState<"overview" | "pnl">("overview");
 
-  // Local range (fund only)
-  const [range, setRange] = useState<LocalRangePreset>("30D");
   const [portfolioPnlAllTime, setPortfolioPnlAllTime] = useState<number | null>(
     null
   );
@@ -201,8 +188,8 @@ export const FundManagement: React.FC<FundManagementProps> = ({
       ? equityHistory
       : fundEquityHistoryMock;
 
-  // apply range filtering
-  const equitySource = filterByRange(equityRaw, range).map((d, _, arr) => {
+  // apply baseline calculations (no range filtering)
+  const equitySource = equityRaw.map((d, _, arr) => {
     // nếu totalPnl chưa có, tính chênh lệch so với điểm đầu trong phạm vi
     if (d.totalPnl === undefined && arr.length > 0) {
       const first = arr[0];
@@ -226,7 +213,7 @@ export const FundManagement: React.FC<FundManagementProps> = ({
   );
 
   // ===============================
-  // Recalculate metrics by current range
+  // Recalculate metrics (no range slicing)
   // ===============================
   const latestEquityPoint = equitySource[equitySource.length - 1];
 
@@ -278,12 +265,29 @@ export const FundManagement: React.FC<FundManagementProps> = ({
     );
     const totalEquityFromBots =
       totalInvestedFromBots + realTimePnlFromBots + totalPnlFromBots;
-    const tradesSum = mergedBots.reduce((s, b) => s + getBotTrades(b), 0);
-    const winTrades = mergedBots.reduce((s, b) => {
-      const trades = getBotTrades(b);
-      const wr = Number((b as any).avgWr || 0);
-      return s + trades * wr;
-    }, 0);
+    // Aggregate winrate dựa trên position history (PnL > 0)
+    const portfolioHistory = collectPositionHistory(mergedBots);
+    let totalClosedTrades = 0;
+    let totalWins = 0;
+
+    if (portfolioHistory.length) {
+      for (const entry of portfolioHistory) {
+        totalClosedTrades += 1;
+        if (entry.pnl > 0) totalWins += 1;
+      }
+    }
+
+    // Fallback khi không có history: ước tính theo avgWr * totalTrades
+    if (totalClosedTrades === 0) {
+      const tradesSum = mergedBots.reduce((s, b) => s + getBotTrades(b), 0);
+      const winTrades = mergedBots.reduce((s, b) => {
+        const trades = getBotTrades(b);
+        const wr = Number((b as any).avgWr || 0);
+        return s + trades * wr;
+      }, 0);
+      totalClosedTrades = tradesSum;
+      totalWins = winTrades;
+    }
     const profitFactors = mergedBots
       .map((bot) => Number(bot.profitFactor))
       .filter((val) => Number.isFinite(val) && val > 0);
@@ -292,9 +296,6 @@ export const FundManagement: React.FC<FundManagementProps> = ({
         ? profitFactors.reduce((sum, val) => sum + val, 0) /
           profitFactors.length
         : undefined;
-
-    let totalClosedTrades = tradesSum;
-    let totalWins = winTrades;
 
     if (botHistories && Object.keys(botHistories).length) {
       totalClosedTrades = 0;
@@ -320,7 +321,7 @@ export const FundManagement: React.FC<FundManagementProps> = ({
         ? Math.max(0, Math.min(1, totalWins / totalClosedTrades))
         : 0;
 
-    const portfolioHistory = collectPositionHistory(mergedBots);
+    // Drawdown dựa trên history
     const maxDrawdownFromBots = calcMaxDrawdownFromHistory(
       portfolioHistory,
       totalInvestedFromBots
@@ -392,48 +393,29 @@ export const FundManagement: React.FC<FundManagementProps> = ({
   // ===============================
   return (
     <div className="flex flex-col gap-4">
-      {/* Tabs + Range Selector */}
-      <div className="flex items-center justify-between">
-        <div className="flex gap-2">
-          <button
-            onClick={() => setActiveTab("overview")}
-            className={`px-3 py-1.5 text-xs rounded-full border ${
-              activeTab === "overview"
-                ? "bg-neutral-800 border-neutral-600 text-neutral-100"
-                : "border-transparent text-neutral-400 hover:text-neutral-100 hover:bg-neutral-900"
-            }`}
-          >
-            Overview
-          </button>
+      {/* Tabs */}
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => setActiveTab("overview")}
+          className={`px-3 py-1.5 text-xs rounded-full border ${
+            activeTab === "overview"
+              ? "bg-neutral-800 border-neutral-600 text-neutral-100"
+              : "border-transparent text-neutral-400 hover:text-neutral-100 hover:bg-neutral-900"
+          }`}
+        >
+          Overview
+        </button>
 
-          <button
-            onClick={() => setActiveTab("pnl")}
-            className={`px-3 py-1.5 text-xs rounded-full border ${
-              activeTab === "pnl"
-                ? "bg-neutral-800 border-neutral-600 text-neutral-100"
-                : "border-transparent text-neutral-400 hover:text-neutral-100 hover:bg-neutral-900"
-            }`}
-          >
-            PnL History
-          </button>
-        </div>
-
-        {/* RANGE chỉ hiển thị ở tab Overview */}
-        {activeTab === "overview" && (
-          <div className="flex items-center gap-2 text-xs">
-            <span className="text-neutral-500">Range</span>
-            <select
-              value={range}
-              onChange={(e) => setRange(e.target.value as LocalRangePreset)}
-              className="bg-neutral-900 border border-neutral-700 text-xs rounded-full px-3 py-1.5 text-neutral-200 outline-none"
-            >
-              <option value="7D">7D</option>
-              <option value="30D">30D</option>
-              <option value="90D">90D</option>
-              <option value="ALL">All</option>
-            </select>
-          </div>
-        )}
+        <button
+          onClick={() => setActiveTab("pnl")}
+          className={`px-3 py-1.5 text-xs rounded-full border ${
+            activeTab === "pnl"
+              ? "bg-neutral-800 border-neutral-600 text-neutral-100"
+              : "border-transparent text-neutral-400 hover:text-neutral-100 hover:bg-neutral-900"
+          }`}
+        >
+          PnL History
+        </button>
       </div>
 
       {/* ==========================
@@ -611,7 +593,7 @@ export const FundManagement: React.FC<FundManagementProps> = ({
         // ==========================
         <PnLHistory
           mode="portfolio"
-          defaultRange={range as RangePreset}
+          defaultRange={"30D" as RangePreset}
         />
       )}
     </div>

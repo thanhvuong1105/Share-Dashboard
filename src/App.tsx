@@ -9,8 +9,10 @@ import {
   fetchFundOverview,
   type FundOverviewApiPayload,
   fetchLatestTicker,
+  fetchMarketTicker,
   type TickerInfo,
 } from "./okxClient";
+import { CoinLogo } from "./icons/CoinLogos";
 
 type MainTab = "fund" | "bots";
 
@@ -77,8 +79,9 @@ const App: React.FC = () => {
     };
   };
 
-  const ACTIVE_POLL_MS = 3000;
-  const IDLE_POLL_MS = 5000;
+  const ACTIVE_POLL_MS = 5000;
+  const IDLE_POLL_MS = 10000;
+  const MAX_EQUITY_POINTS = 100; // tránh phình dữ liệu gây lag UI thêm
 
   // Gọi OKX định kỳ (linh hoạt 3s hoặc 5s)
   useEffect(() => {
@@ -112,12 +115,16 @@ const App: React.FC = () => {
               totalPnl: overview.totalPnl,
             },
           ];
+          const trimmed =
+            next.length > MAX_EQUITY_POINTS
+              ? next.slice(next.length - MAX_EQUITY_POINTS)
+              : next;
           try {
-            localStorage.setItem("equityHistory", JSON.stringify(next));
+            localStorage.setItem("equityHistory", JSON.stringify(trimmed));
           } catch {
             // ignore storage errors
           }
-          return next;
+          return trimmed;
         });
       } catch (err: any) {
         if (!isMounted) return;
@@ -149,11 +156,56 @@ const App: React.FC = () => {
 
   useEffect(() => {
     let cancelled = false;
-    const symbols = ["BTCUSDT", "ETHUSDT"];
+    const symbols = ["BTCUSDT.P", "ETHUSDT.P"];
+
+    const symbolToInstId = (sym: string) => {
+      const base = sym.toUpperCase().replace(/\.P$/, "");
+      return base.endsWith("USDT")
+        ? `${base.replace(/USDT$/, "")}-USDT-SWAP`
+        : `${base}-SWAP`;
+    };
 
     const loadTickers = async () => {
       try {
         const data = await fetchLatestTicker(symbols);
+
+        // Fallback per symbol if missing or missing high/low
+        const needsFallback = symbols.filter((s) => {
+          const info = data[s];
+          if (!info) return true;
+          const hasHigh = info.high24h !== undefined && Number.isFinite(info.high24h);
+          const hasLow = info.low24h !== undefined && Number.isFinite(info.low24h);
+          return !hasHigh || !hasLow;
+        });
+
+        if (needsFallback.length) {
+          const fallbackPairs = await Promise.all(
+            needsFallback.map(async (sym) => {
+              const instId = symbolToInstId(sym);
+              const t = await fetchMarketTicker(instId);
+              if (!t) return null;
+              return [
+                sym,
+                {
+                  symbol: sym,
+                  lastPrice: t.lastPrice,
+                  changePercent: t.changePercent,
+                  changeAbsolute: t.changeAbsolute,
+                  high24h: t.high24h,
+                  low24h: t.low24h,
+                } as TickerInfo,
+              ] as const;
+            })
+          );
+
+          for (const pair of fallbackPairs) {
+            if (pair) {
+              const [sym, info] = pair;
+              data[sym] = { ...(data[sym] || {}), ...info };
+            }
+          }
+        }
+
         if (!cancelled) {
           setTickers(data);
         }
@@ -173,42 +225,95 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-50">
       {/* HEADER */}
-      <header className="border-b border-neutral-800 px-4 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold">Bot Trading Dashboard</span>
-            <span className="px-2 py-0.5 text-[10px] rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-              Beta
-            </span>
-          </div>
-          <div className="flex items-center gap-4 text-[11px]">
-            {["BTCUSDT", "ETHUSDT"].map((sym) => {
-              const info = tickers[sym];
-              const diffClass =
-                info && info.changePercent >= 0
-                  ? "text-emerald-400"
-                  : "text-red-400";
-              return (
-                <div key={sym} className="flex flex-col">
-                  <span className="text-neutral-500">{sym}</span>
-                  {info ? (
-                    <span className="text-neutral-200">
+      <header className="relative border-b border-neutral-800 px-4 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold">Bot Trading Dashboard</span>
+          <span className="px-2 py-0.5 text-[10px] rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+            Beta
+          </span>
+        </div>
+
+        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-8 whitespace-nowrap text-[13px]">
+          {["BTCUSDT.P", "ETHUSDT.P"].map((sym) => {
+            const info = tickers[sym];
+            const diffClass =
+              info && info.changePercent >= 0
+                ? "text-emerald-400"
+                : "text-red-400";
+            const changeAbs: number | null =
+              info && Number.isFinite(info.changeAbsolute)
+                ? Number(info.changeAbsolute)
+                : info &&
+                  Number.isFinite(info.lastPrice) &&
+                  Number.isFinite(info.changePercent)
+                ? Number(
+                    info.lastPrice -
+                      info.lastPrice /
+                        (1 + Number(info.changePercent || 0) / 100)
+                  )
+                : null;
+            const high24h: number | null =
+              info && Number.isFinite(info.high24h)
+                ? Number(info.high24h)
+                : null;
+            const low24h: number | null =
+              info && Number.isFinite(info.low24h)
+                ? Number(info.low24h)
+                : null;
+            return (
+              <div
+                key={sym}
+                className="flex items-center gap-3"
+              >
+                <CoinLogo coin={sym.startsWith("ETH") ? "ETH" : "BTC"} size={18} />
+                <span className="text-neutral-50 text-[13px] font-semibold tracking-tight">
+                  {sym}
+                </span>
+                {info ? (
+                  <>
+                    <span className={`text-sm font-semibold ${diffClass}`}>
                       {info.lastPrice.toLocaleString("en-US", {
                         minimumFractionDigits: 2,
                         maximumFractionDigits: 2,
-                      })}{" "}
-                      <span className={diffClass}>
-                        ({info.changePercent.toFixed(2)}%)
-                      </span>
+                      })}
                     </span>
-                  ) : (
-                    <span className="text-neutral-400">loading…</span>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+                    <span className={`${diffClass} text-[12px] font-medium`}>
+                      {changeAbs !== null
+                        ? `${changeAbs >= 0 ? "+" : ""}${changeAbs.toLocaleString("en-US", {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}`
+                        : ""}
+                      {" "}
+                      ({info.changePercent.toFixed(2)}%)
+                    </span>
+                    <span className="text-neutral-500 text-[12px]">High 24h</span>
+                    <span className="text-neutral-100 text-[12px] font-medium">
+                      {high24h !== null
+                        ? high24h.toLocaleString("en-US", {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })
+                        : "—"}
+                    </span>
+                    <span className="text-neutral-500 text-[12px]">Low 24h</span>
+                    <span className="text-neutral-100 text-[12px] font-medium">
+                      {low24h !== null
+                        ? low24h.toLocaleString("en-US", {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })
+                        : "—"}
+                    </span>
+                  </>
+                ) : (
+                  <span className="text-neutral-400">loading…</span>
+                )}
+              </div>
+            );
+          })}
         </div>
+
         <div className="text-[11px] text-neutral-400 flex flex-col items-end">
           <span>VN Timezone (GMT+7)</span>
           {lastUpdated && (

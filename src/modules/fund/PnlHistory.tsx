@@ -110,6 +110,21 @@ const PnLHistory: React.FC<PnLHistoryProps> = ({
     winrate: 0,
   });
 
+  // Sync when parent updates defaultRange
+  useEffect(() => {
+    const presets: RangePreset[] = [
+      "7D",
+      "30D",
+      "90D",
+      "180D",
+      "365D",
+      "ALL",
+    ];
+    if (presets.includes(defaultRange as RangePreset)) {
+      setRange(defaultRange as RangePreset);
+    }
+  }, [defaultRange]);
+
   // Gọi backend lấy dữ liệu PnL (mặc định lấy Signal Bot)
   useEffect(() => {
     let isMounted = true;

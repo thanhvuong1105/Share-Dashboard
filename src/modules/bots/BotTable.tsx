@@ -125,10 +125,6 @@ const BotTable: React.FC<BotTableProps> = ({
   range,
   onBotDoubleClick,
 }) => {
-  const formatStreakAvg = (value?: number | null) =>
-    typeof value === "number" && Number.isFinite(value)
-      ? value.toFixed(1)
-      : "0.0";
   const formatPercent = (value?: number | null) =>
     typeof value === "number" && Number.isFinite(value)
       ? `${(value * 100).toFixed(1)}%`
@@ -239,32 +235,26 @@ const BotTable: React.FC<BotTableProps> = ({
                   : bot.positionPnl > 0
                   ? "text-emerald-400"
                   : "text-red-400";
-              const loseAvgMap = bot.loseStreakAvgPerRange || {};
-              const loseAvgRange =
-                typeof loseAvgMap[range] === "number"
-                  ? loseAvgMap[range]
-                  : typeof bot.loseStreakAvgAll === "number"
-                  ? bot.loseStreakAvgAll
+              const winCurrent =
+                typeof bot.winStreakCurrent === "number" &&
+                Number.isFinite(bot.winStreakCurrent)
+                  ? Math.round(bot.winStreakCurrent)
                   : 0;
-              const loseAvgAll =
-                typeof bot.loseStreakAvgAll === "number"
-                  ? bot.loseStreakAvgAll
-                  : typeof loseAvgMap.ALL === "number"
-                  ? loseAvgMap.ALL
-                  : loseAvgRange;
-              const winAvgMap = bot.winStreakAvgPerRange || {};
-              const winAvgRange =
-                typeof winAvgMap[range] === "number"
-                  ? winAvgMap[range]
-                  : typeof bot.winStreakAvgAll === "number"
-                  ? bot.winStreakAvgAll
+              const loseCurrent =
+                typeof bot.loseStreakCurrent === "number" &&
+                Number.isFinite(bot.loseStreakCurrent)
+                  ? Math.round(bot.loseStreakCurrent)
                   : 0;
-              const winAvgAll =
-                typeof bot.winStreakAvgAll === "number"
-                  ? bot.winStreakAvgAll
-                  : typeof winAvgMap.ALL === "number"
-                  ? winAvgMap.ALL
-                  : winAvgRange;
+              const winMax =
+                typeof bot.winStreakMax === "number" &&
+                Number.isFinite(bot.winStreakMax)
+                  ? Math.round(bot.winStreakMax)
+                  : winCurrent;
+              const loseMax =
+                typeof bot.loseStreakMax === "number" &&
+                Number.isFinite(bot.loseStreakMax)
+                  ? Math.round(bot.loseStreakMax)
+                  : loseCurrent;
               const winRateMap = bot.winRatePerRange || {};
               const rangeWrValue =
                 typeof winRateMap[range] === "number"
@@ -386,18 +376,18 @@ const BotTable: React.FC<BotTableProps> = ({
                     <div className="text-[11px] flex items-center justify-center gap-3">
                       <div className="flex items-center gap-1">
                         <span className="text-emerald-400">
-                          {formatStreakAvg(winAvgRange)}
+                          {winCurrent}
                         </span>
                         <span className="text-neutral-500">
-                          / {formatStreakAvg(winAvgAll)}
+                          / {winMax}
                         </span>
                       </div>
                       <div className="flex items-center gap-1">
                         <span className="text-red-400">
-                          {formatStreakAvg(loseAvgRange)}
+                          {loseCurrent}
                         </span>
                         <span className="text-neutral-500">
-                          / {formatStreakAvg(loseAvgAll)}
+                          / {loseMax}
                         </span>
                       </div>
                     </div>
