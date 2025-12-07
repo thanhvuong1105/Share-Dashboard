@@ -34,9 +34,14 @@ export type PortfolioPnlHistoryParams = {
 };
 
 const API_BASE = getApiBase();
+const NGROK_HEADERS = API_BASE.includes("ngrok")
+  ? { "ngrok-skip-browser-warning": "true" }
+  : undefined;
 
 export async function fetchFundOverview(): Promise<FundOverviewApiPayload> {
-  const res = await fetch(`${API_BASE}/api/fund-overview`);
+  const res = await fetch(`${API_BASE}/api/fund-overview`, {
+    headers: NGROK_HEADERS,
+  });
 
   if (!res.ok) {
     throw new Error(`Failed to fetch /api/fund-overview: ${res.status}`);
@@ -78,7 +83,9 @@ export async function fetchLatestTicker(
   if (!symbols.length) return {};
   const params = new URLSearchParams();
   params.set("symbols", symbols.join(","));
-  const res = await fetch(`${API_BASE}/api/tickers?${params.toString()}`);
+  const res = await fetch(`${API_BASE}/api/tickers?${params.toString()}`, {
+    headers: NGROK_HEADERS,
+  });
   if (!res.ok) {
     throw new Error(`Failed to fetch tickers: ${res.status}`);
   }
@@ -152,7 +159,7 @@ export async function fetchPnlHistory(
   if (source === "signal" && state) params.set("state", state);
   const url = `${API_BASE}/api/pnl-history?${params.toString()}`;
 
-  const res = await fetch(url);
+  const res = await fetch(url, { headers: NGROK_HEADERS });
 
   if (!res.ok) {
     throw new Error(`Failed to fetch /api/pnl-history: ${res.status}`);
@@ -213,7 +220,8 @@ export async function fetchSignalBotHistory(
 
   try {
     const res = await fetch(
-      `${API_BASE}/api/signal-bot-history?algoId=${encodeURIComponent(algoId)}`
+      `${API_BASE}/api/signal-bot-history?algoId=${encodeURIComponent(algoId)}`,
+      { headers: NGROK_HEADERS }
     );
 
     // cố gắng parse JSON, nếu fail thì dùng object rỗng

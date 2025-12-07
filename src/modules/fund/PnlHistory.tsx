@@ -62,6 +62,9 @@ type PnLHistoryProps = {
 };
 
 const API_BASE = getApiBase();
+const NGROK_HEADERS = API_BASE.includes("ngrok")
+  ? { "ngrok-skip-browser-warning": "true" }
+  : undefined;
 
 const formatCurrency = (v: number, currency = "USDT") => {
   if (!Number.isFinite(v)) return "-";
@@ -161,7 +164,7 @@ const PnLHistory: React.FC<PnLHistoryProps> = ({
           url += `&algoId=${encodeURIComponent(algoId)}`;
         }
 
-        const res = await fetch(url);
+        const res = await fetch(url, { headers: NGROK_HEADERS });
         const json = (await res.json()) as any;
 
         if (!res.ok || (json && json.error)) {

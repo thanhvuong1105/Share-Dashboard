@@ -8,6 +8,9 @@ type CoinTab = "BTC" | "ETH";
 type RangePreset = "7D" | "30D" | "90D" | "180D" | "365D" | "ALL";
 
 const API_BASE = getApiBase();
+const NGROK_HEADERS = API_BASE.includes("ngrok")
+  ? { "ngrok-skip-browser-warning": "true" }
+  : undefined;
 const RANGE_PRESETS: RangePreset[] = ["7D", "30D", "90D", "180D", "365D", "ALL"];
 const DAY_MS = 24 * 60 * 60 * 1000;
 const RANGE_TO_MS: Record<RangePreset, number | null> = {
@@ -225,7 +228,14 @@ const fetchJsonWithRetry = async (
   let attempt = 0;
   while (true) {
     try {
-      const res = await fetch(url, init);
+      const mergedInit: RequestInit = {
+        ...init,
+        headers: {
+          ...(NGROK_HEADERS || {}),
+          ...(init?.headers || {}),
+        },
+      };
+      const res = await fetch(url, mergedInit);
       const json = await res.json().catch(() => ({}));
       const isRateLimited =
         res.status === 429 || json?.code === "50011" || json?.msg === "Too Many Requests";

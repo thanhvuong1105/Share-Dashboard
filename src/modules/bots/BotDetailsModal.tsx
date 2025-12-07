@@ -11,6 +11,9 @@ import { fetchSignalBotHistory, type SignalBotTrade } from "../../okxClient";
 import { getApiBase } from "../../api/baseUrl";
 
 const API_BASE = getApiBase();
+const NGROK_HEADERS = API_BASE.includes("ngrok")
+  ? { "ngrok-skip-browser-warning": "true" }
+  : undefined;
 
 interface BotDetailsModalProps {
   bot: any & { credIdx?: number }; // tạm dùng any, sau này refactor type sau
@@ -258,7 +261,8 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({
     const fetchTicker = async () => {
       try {
         const res = await fetch(
-          `${API_BASE}/api/market-ticker?instId=${encodeURIComponent(instId)}`
+          `${API_BASE}/api/market-ticker?instId=${encodeURIComponent(instId)}`,
+          { headers: NGROK_HEADERS }
         );
         if (!res.ok) return;
         const json = await res.json();
@@ -384,7 +388,8 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({
         const res = await fetch(
           `${API_BASE}/api/signal-positions?algoId=${encodeURIComponent(
             algoId
-          )}${bot?.credIdx !== undefined ? `&credIdx=${bot.credIdx}` : ""}`
+          )}${bot?.credIdx !== undefined ? `&credIdx=${bot.credIdx}` : ""}`,
+          { headers: NGROK_HEADERS }
         );
         if (!res.ok) return;
         const json = await res.json();
@@ -462,7 +467,8 @@ const BotDetailsModal: React.FC<BotDetailsModalProps> = ({
         const res = await fetch(
           `${API_BASE}/api/signal-positions-history?algoId=${encodeURIComponent(
             algoId
-          )}${bot?.credIdx !== undefined ? `&credIdx=${bot.credIdx}` : ""}`
+          )}${bot?.credIdx !== undefined ? `&credIdx=${bot.credIdx}` : ""}`,
+          { headers: NGROK_HEADERS }
         );
         const json = await res.json();
         if (cancelled) return;
