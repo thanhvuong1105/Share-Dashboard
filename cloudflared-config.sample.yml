@@ -1,0 +1,10 @@
+tunnel: 0cb9c3cd-7cf4-4238-abc8-77a29a455cc2
+credentials-file: /Users/nguyenthanhvuong/.cloudflared/0cb9c3cd-7cf4-4238-abc8-77a29a455cc2.json
+
+ingress:
+  - hostname: dashboard.bottrading.com
+    service: http://localhost:4173
+  - hostname: dashboard.bottrading.com
+    path: /api/*
+    service: http://localhost:4000
+  - service: http_status:404

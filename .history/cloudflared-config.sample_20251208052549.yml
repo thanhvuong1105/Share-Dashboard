@@ -1,0 +1,16 @@
+# Sample Cloudflare Tunnel config for dashboard
+# Copy this to ~/.cloudflared/config.yml and adjust hostname/domain before running.
+
+tunnel: 0cb9c3cd-7cf4-4238-abc8-77a29a455cc2
+credentials-file: /Users/nguyenthanhvuong/.cloudflared/0cb9c3cd-7cf4-4238-abc8-77a29a455cc2.json
+
+ingress:
+  # Frontend (serve dist on 4173, e.g. with `npx serve dist -l 4173`)
+  - hostname: dashboard.yourdomain.com
+    service: http://localhost:4173
+  # Backend API (server.cjs on 4000 via PM2)
+  - hostname: dashboard.yourdomain.com
+    path: /api/*
+    service: http://localhost:4000
+  # Fallback
+  - service: http_status:404
