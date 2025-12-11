@@ -248,6 +248,10 @@ export const FundManagement: React.FC<FundManagementProps> = ({
       (s, b) => s + Number(b.totalPnl || 0),
       0
     );
+    const positionPnlFromBots = mergedBots.reduce(
+      (s, b) => s + Number(b.positionPnl || 0),
+      0
+    );
     // Balance = tổng vốn đã deploy + PnL history (all bots, all time).
     const totalInvestedFromBots = mergedBots.reduce((sum, bot) => {
       const invested = Number(bot.investedAmount ?? 0);
@@ -334,6 +338,7 @@ export const FundManagement: React.FC<FundManagementProps> = ({
       balanceFromBots,
       realTimePnlFromBots,
       initialFromBots: totalInvestedFromBots,
+      positionPnlTotal: positionPnlFromBots,
       winrate: winrateNormalized,
       profitFactor,
       maxDrawdownFromBots,
@@ -343,29 +348,31 @@ export const FundManagement: React.FC<FundManagementProps> = ({
 
   const botAgg = aggregateFromBots();
 
+  const initialValue = Number(
+    botAgg?.initialFromBots ?? baseMetrics.balance ?? 0
+  );
+  const totalPnlValueFromBots = Number(
+    botAgg?.positionPnlTotal ?? baseMetrics.totalPnl ?? 0
+  );
+  const realTimePnlValue = Number(
+    botAgg?.realTimePnlFromBots ?? baseMetrics.realTimePnl ?? 0
+  );
+
+  const totalEquityComputed =
+    (Number.isFinite(initialValue) ? initialValue : 0) +
+    (Number.isFinite(realTimePnlValue) ? realTimePnlValue : 0) +
+    (Number.isFinite(totalPnlValueFromBots) ? totalPnlValueFromBots : 0);
+
   const metricsRange = {
     ...baseMetrics,
-    totalEquity:
-      botAgg?.totalEquityFromBots ??
-      latestEquityPoint?.totalEquity ??
-      baseMetrics.totalEquity ??
-      0,
+    totalEquity: totalEquityComputed,
     balance:
       botAgg?.balanceFromBots !== undefined
         ? botAgg.balanceFromBots
         : latestEquityPoint?.balance ?? baseMetrics.balance ?? 0,
-    initial:
-      botAgg?.initialFromBots !== undefined
-        ? botAgg.initialFromBots
-        : baseMetrics.balance ?? 0,
-    totalPnl:
-      botAgg?.totalPnlFromBots ??
-      baseMetrics.totalPnl ??
-      0,
-    realTimePnl:
-      botAgg?.realTimePnlFromBots ??
-      baseMetrics.realTimePnl ??
-      0,
+    initial: initialValue,
+    totalPnl: totalPnlValueFromBots,
+    realTimePnl: realTimePnlValue,
     openPositions:
       botAgg?.openPositions !== undefined
         ? botAgg.openPositions
